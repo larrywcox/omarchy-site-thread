@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "larrywcox.site-thread",
+  "name": "UniFi SiteThread",
+  "version": "0.4.6",
+  "author": "Larry Cox",
+  "description": "Fleet-wide UniFi Site Manager with in-panel Network and Protect site views.",
+  "homepage": "https://github.com/larrywcox/omarchy-site-thread",
+  "license": "MIT",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "UniFi SiteThread",
+    "description": "Every UniFi site, WAN failover health, live devices, and Protect cameras in one panel.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshSeconds": 30,
+      "panelWidth": 760
+    },
+    "schema": [
+      {
+        "key": "refreshSeconds",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 10,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often UniFi SiteThread refreshes Network and Protect health."
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 520,
+        "max": 1200,
+        "step": 20,
+        "defaultValue": 760
+      }
+    ]
+  }
+}
