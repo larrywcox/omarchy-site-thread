@@ -71,11 +71,8 @@ UniFi SiteThread needs the following commands:
 - `secret-tool` from `libsecret`, for secure API-key storage
 - `wl-paste` from `wl-clipboard`, for the **Paste API key from clipboard** button
 
-On Omarchy, install any missing packages with:
-
-```bash
-omarchy pkg add python curl openssl libsecret wl-clipboard
-```
+Install any missing dependency through your system package manager before
+enabling the plugin.
 
 ## Update
 
