@@ -1,0 +1,812 @@
+#!/usr/bin/env python3
+"""Secure local helper for the Omarchy UniFi SiteThread bar plugin.
+
+The API key is accepted only over stdin and stored in the desktop Secret
+Service. Console identity is pinned before the key is transmitted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import ssl
+import subprocess
+import sys
+from typing import Any
+from urllib.parse import quote, urlencode, urlparse
+
+
+APP = "site-thread"
+LEGACY_APP = "unifi-fabric"
+PROFILE = "default"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+CONFIG_FILE = CONFIG_DIR / "connection.json"
+LEGACY_CONFIG_FILE = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / LEGACY_APP / "connection.json"
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/{APP}-{os.getuid()}")) / APP
+KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{8,4096}$")
+ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+HOST_ID_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{1,256}$")
+
+
+class FabricError(RuntimeError):
+    pass
+
+
+def emit(payload: dict[str, Any], exit_code: int = 0) -> None:
+    print(json.dumps(payload, separators=(",", ":")))
+    raise SystemExit(exit_code)
+
+
+def fail(message: str, *, connected: bool | None = None) -> None:
+    payload: dict[str, Any] = {"ok": False, "error": message}
+    if connected is not None:
+        payload["connected"] = connected
+    emit(payload, 1)
+
+
+def private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink() or not path.is_dir() or path.stat().st_uid != os.getuid():
+        raise FabricError(f"Unsafe private directory: {path}")
+    path.chmod(0o700)
+
+
+def normalize_host(raw: str) -> tuple[str, str, int]:
+    value = raw.strip()
+    if not value:
+        raise FabricError("Enter the address of your UniFi console")
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise FabricError("Use an HTTPS console address")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise FabricError("The console address must not contain credentials or query data")
+    if parsed.path not in ("", "/"):
+        raise FabricError("Use the console address without an application path")
+    port = parsed.port or 443
+    display = parsed.hostname if port == 443 else f"{parsed.hostname}:{port}"
+    return "https://" + display, parsed.hostname, port
+
+
+def run(command: list[str], *, input_text: str | None = None, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FabricError(str(exc)) from exc
+
+
+def fetch_certificate(hostname: str, port: int) -> str:
+    result = run(
+        [
+            "openssl",
+            "s_client",
+            "-connect",
+            f"{hostname}:{port}",
+            "-servername",
+            hostname,
+            "-showcerts",
+        ],
+        input_text="",
+        timeout=10,
+    )
+    match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", result.stdout, re.S)
+    if not match:
+        raise FabricError("Could not read the console certificate")
+    return match.group(0) + "\n"
+
+
+def certificate_identity(pem: str) -> tuple[str, str]:
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    fingerprint = hashlib.sha256(der).hexdigest().upper()
+    pretty = ":".join(fingerprint[index:index + 2] for index in range(0, len(fingerprint), 2))
+
+    try:
+        pubkey = subprocess.run(
+            ["openssl", "x509", "-pubkey", "-noout"],
+            input=pem.encode(), capture_output=True, timeout=10, check=False,
+        )
+        encoded = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-outform", "DER"],
+            input=pubkey.stdout, capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FabricError("Could not read the console public key") from exc
+    if pubkey.returncode != 0 or encoded.returncode != 0 or not encoded.stdout:
+        raise FabricError("Could not pin the console public key")
+    spki = base64.b64encode(hashlib.sha256(encoded.stdout).digest()).decode("ascii")
+    return pretty, spki
+
+
+def read_config() -> dict[str, Any] | None:
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("mode") == "cloud" and data.get("baseUrl") == "https://api.ui.com":
+            return data
+        required = ("baseUrl", "hostname", "port", "fingerprint", "spki")
+        if all(data.get(key) not in (None, "") for key in required):
+            return data
+    return None
+
+
+def write_config(data: dict[str, Any]) -> None:
+    private_dir(CONFIG_DIR)
+    temp = CONFIG_DIR / ".connection.json.tmp"
+    temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    temp.chmod(0o600)
+    temp.replace(CONFIG_FILE)
+    CONFIG_FILE.chmod(0o600)
+
+
+def secret_lookup() -> str:
+    for application in (APP, LEGACY_APP):
+        result = run(["secret-tool", "lookup", "application", application, "profile", PROFILE], timeout=8)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return ""
+
+
+def secret_store(key: str) -> None:
+    result = run(
+        ["secret-tool", "store", "--label=UniFi SiteThread API key", "application", APP, "profile", PROFILE],
+        input_text=key,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise FabricError("The desktop credential store rejected the API key")
+
+
+def secret_clear() -> None:
+    for application in (APP, LEGACY_APP):
+        run(["secret-tool", "clear", "application", application, "profile", PROFILE], timeout=10)
+
+
+def api_request(config: dict[str, Any], key: str, path: str, *, output: Path | None = None) -> tuple[int, str]:
+    if not KEY_PATTERN.fullmatch(key):
+        raise FabricError("The stored API key is malformed")
+    url = config["baseUrl"] + path
+    args = [
+        "curl", "-sS", "-k", "--pinnedpubkey", f"sha256//{config['spki']}",
+        "--config", "-", "--max-time", "12", "-w", "\n%{http_code}",
+    ]
+    if output is not None:
+        args.extend(["-o", str(output)])
+    args.append(url)
+    result = run(args, input_text=f'header = "X-API-KEY: {key}"\n', timeout=18)
+    if result.returncode != 0:
+        raise FabricError("The UniFi console could not be reached securely")
+    lines = result.stdout.rstrip("\n").split("\n")
+    try:
+        status = int(lines[-1])
+    except (IndexError, ValueError) as exc:
+        raise FabricError("The console returned an invalid response") from exc
+    return status, "\n".join(lines[:-1])
+
+
+def json_request(config: dict[str, Any], key: str, path: str) -> tuple[int, Any]:
+    status, body = api_request(config, key, path)
+    try:
+        payload = json.loads(body) if body else None
+    except json.JSONDecodeError:
+        payload = None
+    return status, payload
+
+
+def cloud_json_request(key: str, path: str) -> tuple[int, Any]:
+    if not KEY_PATTERN.fullmatch(key):
+        raise FabricError("The stored API key is malformed")
+    result = run(
+        [
+            "curl", "-sS", "--fail-with-body", "--max-time", "15",
+            "--config", "-", "-w", "\n%{http_code}", "https://api.ui.com" + path,
+        ],
+        input_text=f'header = "Accept: application/json"\nheader = "X-API-KEY: {key}"\n',
+        timeout=20,
+    )
+    lines = result.stdout.rstrip("\n").split("\n")
+    try:
+        status = int(lines[-1])
+    except (IndexError, ValueError) as exc:
+        raise FabricError("UniFi Site Manager returned an invalid response") from exc
+    body = "\n".join(lines[:-1])
+    try:
+        payload = json.loads(body) if body else None
+    except json.JSONDecodeError:
+        payload = None
+    return status, payload
+
+
+def connector_path(host_id: str, path: str) -> str:
+    if not HOST_ID_PATTERN.fullmatch(host_id):
+        raise FabricError("Invalid UniFi console id")
+    return f"/v1/connector/consoles/{quote(host_id, safe='')}/proxy/{path.lstrip('/')}"
+
+
+def cloud_file_request(key: str, path: str, output: Path) -> int:
+    if not KEY_PATTERN.fullmatch(key):
+        raise FabricError("The stored API key is malformed")
+    result = run(
+        [
+            "curl", "-sS", "--max-time", "15", "--config", "-",
+            "-o", str(output), "-w", "%{http_code}", "https://api.ui.com" + path,
+        ],
+        input_text=f'header = "X-API-KEY: {key}"\n',
+        timeout=20,
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError as exc:
+        raise FabricError("UniFi Cloud Connector returned an invalid response") from exc
+
+
+def cloud_rows(key: str, endpoint: str) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    token = ""
+    for _ in range(20):
+        query = {"pageSize": "200"}
+        if token:
+            query["nextToken"] = token
+        status, payload = cloud_json_request(key, endpoint + "?" + urlencode(query))
+        if status != 200:
+            message = payload.get("message") if isinstance(payload, dict) else ""
+            raise FabricError(message or f"UniFi Site Manager returned HTTP {status}")
+        output.extend(rows(payload))
+        token = str(payload.get("nextToken", "")) if isinstance(payload, dict) else ""
+        if not token:
+            return output
+    raise FabricError("UniFi Site Manager pagination did not finish")
+
+
+def rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "items", "results"):
+            if isinstance(payload.get(key), list):
+                return [item for item in payload[key] if isinstance(item, dict)]
+    return []
+
+
+def first_value(item: dict[str, Any], *keys: str, default: Any = "") -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def is_online(item: dict[str, Any]) -> bool:
+    raw = first_value(item, "state", "status", "connectionState", default="CONNECTED")
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).upper() in {"CONNECTED", "ONLINE", "ACTIVE", "ADOPTED", "UP", "1", "TRUE"}
+
+
+def compact_device(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(first_value(item, "id", "_id", "mac")),
+        "name": str(first_value(item, "name", "displayName", "model", "shortname", default="UniFi device")),
+        "model": str(first_value(item, "model", "shortname", "type")),
+        "ip": str(first_value(item, "ipAddress", "ip", "lanIp")),
+        "online": is_online(item),
+        "update": bool(first_value(item, "firmwareUpgradable", "upgradable", "upgradeable", default=False)),
+    }
+
+
+def nested_number(item: dict[str, Any], *path: str) -> float:
+    value: Any = item
+    for key in path:
+        if not isinstance(value, dict):
+            return 0
+        value = value.get(key)
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def compact_camera(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(first_value(item, "id", "_id")),
+        "name": str(first_value(item, "name", "displayName", default="Camera")),
+        "model": str(first_value(item, "type", "modelKey", "model")),
+        "online": is_online(item),
+        "recording": bool(first_value(item, "isRecording", "recording", default=True)),
+    }
+
+
+def telemetry_flag(value: Any, *names: str) -> bool:
+    wanted = {name.lower() for name in names}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key.lower() in wanted and child is True:
+                return True
+            if telemetry_flag(child, *names):
+                return True
+    elif isinstance(value, list):
+        return any(telemetry_flag(child, *names) for child in value)
+    return False
+
+
+def latest_issue_period(value: Any) -> Any:
+    if isinstance(value, dict) and isinstance(value.get("periods"), list):
+        value = value["periods"]
+    if not isinstance(value, list):
+        return value
+    candidates = [item for item in value if isinstance(item, dict)]
+    if not candidates:
+        return []
+    return max(candidates, key=lambda item: nested_number(item, "index"))
+
+
+def host_is_online(host: dict[str, Any]) -> bool:
+    reported = host.get("reportedState") if isinstance(host.get("reportedState"), dict) else {}
+    state = first_value(reported, "state", "connectionState", default="connected")
+    return str(state).lower() in {"connected", "online", "active", "up"}
+
+
+def site_health(stats: dict[str, Any], counts: dict[str, Any]) -> tuple[str, str]:
+    """Return a conservative current site state from Site Manager telemetry."""
+    offline_gateways = int(nested_number(counts, "offlineGatewayDevice"))
+    total_gateways = int(nested_number(counts, "gatewayDevice"))
+    total_devices = int(nested_number(counts, "totalDevice"))
+    offline_devices = int(nested_number(counts, "offlineDevice"))
+    issues = latest_issue_period(stats.get("internetIssues", []))
+    issue_text = json.dumps(issues, separators=(",", ":")).lower()
+    backup_active = telemetry_flag(
+        issues, "wan2FailoverActive", "wan2_failover_active", "backupWanActive", "backup_wan_active", "failoverActive"
+    )
+    if (
+        offline_gateways > 0
+        or (total_gateways > 0 and offline_gateways >= total_gateways)
+        or (total_devices > 0 and offline_devices >= total_devices)
+        or any(word in issue_text for word in ("unreachable", "internet down", "wan down", "disconnected"))
+    ):
+        return "down", "Site unreachable"
+    if backup_active:
+        return "backup", "Backup WAN active"
+    if telemetry_flag(issues, "wanDowntime", "wan_downtime"):
+        return "down", "Site unreachable"
+    return "up", "Online"
+
+
+def site_sort_key(site: dict[str, Any]) -> tuple[int, str]:
+    priority = {"down": 0, "backup": 1, "up": 2}
+    return priority.get(str(site.get("status", "up")), 3), str(site.get("name", "")).casefold()
+
+
+def demo_summary() -> dict[str, Any]:
+    devices = [
+        {"id": "gw", "name": "Dream Machine Pro", "model": "UDM Pro", "ip": "10.0.0.1", "online": True, "update": False},
+        {"id": "sw", "name": "Core Switch", "model": "USW Pro 24 PoE", "ip": "10.0.0.2", "online": True, "update": True},
+        {"id": "ap", "name": "Living Room AP", "model": "U7 Pro", "ip": "10.0.0.3", "online": True, "update": False},
+    ]
+    cameras = [
+        {"id": "frontdoor", "name": "Front Door", "model": "G4 Doorbell Pro", "online": True, "recording": True},
+        {"id": "driveway", "name": "Driveway", "model": "AI Pro", "online": True, "recording": True},
+        {"id": "backyard", "name": "Backyard", "model": "G5 Turret", "online": True, "recording": True},
+    ]
+    sites = [
+        {"id": "home", "hostId": "console-home", "name": "Home", "isp": "Fiber", "deviceCount": 8, "clientCount": 47, "offlineCount": 0, "updateCount": 1, "wanUptime": 100, "permission": "owner", "status": "up", "statusText": "Online"},
+        {"id": "office", "hostId": "console-office", "name": "Main Office", "isp": "Business Fiber", "deviceCount": 19, "clientCount": 86, "offlineCount": 0, "updateCount": 0, "wanUptime": 99.99, "permission": "admin", "status": "backup", "statusText": "Backup WAN active"},
+        {"id": "warehouse", "hostId": "console-warehouse", "name": "Warehouse", "isp": "Cable", "deviceCount": 11, "clientCount": 31, "offlineCount": 11, "updateCount": 2, "wanUptime": 99.72, "permission": "admin", "status": "down", "statusText": "Site unreachable"},
+    ]
+    sites.sort(key=site_sort_key)
+    return {
+        "ok": True, "connected": True, "demo": True, "mode": "cloud", "host": "unifi.ui.com", "site": "3 sites", "sites": sites,
+        "severity": "critical", "message": "1 device offline across 3 sites",
+        "network": {"available": True, "devices": devices, "deviceCount": 38, "offlineCount": 1, "updateCount": 3, "clientCount": 164},
+        "protect": {"available": True, "cameras": cameras, "cameraCount": 3, "offlineCount": 0},
+    }
+
+
+def build_cloud_summary(key: str) -> dict[str, Any]:
+    raw_sites = cloud_rows(key, "/v1/sites")
+    try:
+        raw_hosts = cloud_rows(key, "/v1/hosts")
+    except FabricError:
+        raw_hosts = []
+    try:
+        raw_groups = cloud_rows(key, "/v1/devices")
+    except FabricError:
+        raw_groups = []
+
+    host_names: dict[str, str] = {}
+    host_online = {
+        str(first_value(host, "id", "hostId")): host_is_online(host)
+        for host in raw_hosts
+        if first_value(host, "id", "hostId")
+    }
+    flattened: list[dict[str, Any]] = []
+    for group in raw_groups:
+        host_id = str(first_value(group, "hostId", "id"))
+        host_name = str(first_value(group, "hostName", "name"))
+        if host_id and host_name:
+            host_names[host_id] = host_name
+        members = group.get("devices")
+        if isinstance(members, list):
+            for member in members:
+                if isinstance(member, dict):
+                    copy = dict(member)
+                    copy.setdefault("hostId", host_id)
+                    copy.setdefault("hostName", host_name)
+                    flattened.append(copy)
+        else:
+            flattened.append(group)
+
+    sites: list[dict[str, Any]] = []
+    total_devices = total_clients = total_offline = total_updates = 0
+    for item in raw_sites:
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        stats = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+        counts = stats.get("counts") if isinstance(stats.get("counts"), dict) else {}
+        percentages = stats.get("percentages") if isinstance(stats.get("percentages"), dict) else {}
+        isp_info = stats.get("ispInfo") if isinstance(stats.get("ispInfo"), dict) else {}
+        host_id = str(first_value(item, "hostId"))
+        raw_name = str(first_value(meta, "desc", "name", default="Site"))
+        name = host_names.get(host_id, raw_name) if raw_name.lower() == "default" else raw_name
+        device_count = int(nested_number(counts, "totalDevice"))
+        client_count = int(sum(nested_number(counts, key) for key in ("wifiClient", "wiredClient", "guestClient")))
+        offline_count = int(nested_number(counts, "offlineDevice"))
+        update_count = int(nested_number(counts, "pendingUpdateDevice"))
+        total_devices += device_count
+        total_clients += client_count
+        total_offline += offline_count
+        total_updates += update_count
+        status, status_text = site_health(stats, counts)
+        if host_id in host_online and not host_online[host_id]:
+            status, status_text = "down", "Site unreachable"
+        sites.append({
+            "id": str(first_value(item, "siteId", "id")),
+            "hostId": host_id,
+            "name": name,
+            "isp": str(first_value(isp_info, "name", "organization")),
+            "timezone": str(first_value(meta, "timezone")),
+            "deviceCount": device_count,
+            "clientCount": client_count,
+            "offlineCount": offline_count,
+            "updateCount": update_count,
+            "wanUptime": nested_number(percentages, "wanUptime"),
+            "permission": str(first_value(item, "permission", default="viewer")),
+            "owner": bool(item.get("isOwner", False)),
+            "status": status,
+            "statusText": status_text,
+        })
+
+    sites.sort(key=site_sort_key)
+
+    devices = [compact_device(item) | {"site": str(first_value(item, "hostName"))} for item in flattened]
+    camera_words = ("camera", "protect", "doorbell", "ai pro", "g3", "g4", "g5", "uvc")
+    camera_items = [
+        item for item in flattened
+        if any(word in " ".join(str(value).lower() for value in item.values() if isinstance(value, (str, int))) for word in camera_words)
+    ]
+    cameras = [compact_camera(item) for item in camera_items]
+    if not total_devices and devices:
+        total_devices = len(devices)
+        total_offline = sum(not item["online"] for item in devices)
+        total_updates = sum(item["update"] for item in devices)
+
+    down_sites = sum(item["status"] == "down" for item in sites)
+    backup_sites = sum(item["status"] == "backup" for item in sites)
+    if down_sites:
+        severity, message = "critical", f"{down_sites} site(s) unreachable"
+    elif backup_sites:
+        severity, message = "warning", f"{backup_sites} site(s) using backup WAN"
+    elif total_offline:
+        severity, message = "critical", f"{total_offline} device(s) offline across {len(sites)} sites"
+    elif total_updates:
+        severity, message = "warning", f"{total_updates} firmware update(s) across {len(sites)} sites"
+    else:
+        severity, message = "healthy", f"All {len(sites)} sites operational"
+    return {
+        "ok": True,
+        "connected": True,
+        "mode": "cloud",
+        "baseUrl": "https://unifi.ui.com",
+        "host": "unifi.ui.com",
+        "site": f"{len(sites)} site" + ("" if len(sites) == 1 else "s"),
+        "sites": sites,
+        "severity": severity,
+        "message": message,
+        "network": {"available": True, "devices": devices, "deviceCount": total_devices, "offlineCount": total_offline, "updateCount": total_updates, "clientCount": total_clients},
+        "protect": {"available": bool(cameras), "cameras": cameras, "cameraCount": len(cameras), "offlineCount": sum(not item["online"] for item in cameras)},
+    }
+
+
+def build_cloud_site(key: str, host_id: str, site_id: str) -> dict[str, Any]:
+    if not ID_PATTERN.fullmatch(site_id):
+        raise FabricError("Invalid UniFi site id")
+
+    site_status, sites_payload = cloud_json_request(key, connector_path(host_id, "/network/integration/v1/sites"))
+    if site_status != 200:
+        raise FabricError(f"This site's Network application is unavailable (HTTP {site_status})")
+    network_sites = rows(sites_payload)
+    chosen = next(
+        (item for item in network_sites if str(first_value(item, "id", "siteId", "_id")) == site_id),
+        network_sites[0] if len(network_sites) == 1 else None,
+    )
+    if not chosen:
+        raise FabricError("UniFi Cloud Connector could not match this Network site")
+    local_site_id = str(first_value(chosen, "id", "siteId", "_id"))
+    if not ID_PATTERN.fullmatch(local_site_id):
+        raise FabricError("The console returned an invalid Network site id")
+
+    device_status, device_payload = cloud_json_request(
+        key, connector_path(host_id, f"/network/integration/v1/sites/{local_site_id}/devices")
+    )
+    client_status, client_payload = cloud_json_request(
+        key, connector_path(host_id, f"/network/integration/v1/sites/{local_site_id}/clients")
+    )
+    devices = [compact_device(item) for item in rows(device_payload)] if device_status == 200 else []
+    clients = rows(client_payload) if client_status == 200 else []
+
+    protect_status, protect_payload = cloud_json_request(
+        key, connector_path(host_id, "/protect/integration/v1/cameras")
+    )
+    protect_installed = protect_status == 200
+    cameras = [compact_camera(item) for item in rows(protect_payload)] if protect_installed else []
+    offline_devices = sum(not item["online"] for item in devices)
+    offline_cameras = sum(not item["online"] for item in cameras)
+    updates = sum(item["update"] for item in devices)
+    return {
+        "ok": True,
+        "connected": True,
+        "mode": "cloud-site",
+        "hostId": host_id,
+        "siteId": site_id,
+        "site": {
+            "id": local_site_id,
+            "name": str(first_value(chosen, "name", "displayName", default="UniFi site")),
+        },
+        "network": {
+            "available": True,
+            "devices": devices,
+            "deviceCount": len(devices),
+            "offlineCount": offline_devices,
+            "updateCount": updates,
+            "clientCount": len(clients),
+        },
+        "protect": {
+            "installed": protect_installed,
+            "available": protect_installed,
+            "cameras": cameras,
+            "cameraCount": len(cameras),
+            "offlineCount": offline_cameras,
+        },
+    }
+
+
+def build_summary(config: dict[str, Any], key: str) -> dict[str, Any]:
+    network_status, sites_payload = json_request(config, key, "/proxy/network/integration/v1/sites")
+    protect_status, cameras_payload = json_request(config, key, "/proxy/protect/integration/v1/cameras")
+
+    sites = rows(sites_payload) if network_status == 200 else []
+    site = sites[0] if sites else {}
+    site_id = str(first_value(site, "id", "siteId", "_id"))
+    devices: list[dict[str, Any]] = []
+    clients: list[dict[str, Any]] = []
+    if site_id:
+        device_status, device_payload = json_request(config, key, f"/proxy/network/integration/v1/sites/{site_id}/devices")
+        client_status, client_payload = json_request(config, key, f"/proxy/network/integration/v1/sites/{site_id}/clients")
+        if device_status == 200:
+            devices = [compact_device(item) for item in rows(device_payload)]
+        if client_status == 200:
+            clients = rows(client_payload)
+
+    cameras = [compact_camera(item) for item in rows(cameras_payload)] if protect_status == 200 else []
+    offline_devices = sum(not item["online"] for item in devices)
+    offline_cameras = sum(not item["online"] for item in cameras)
+    updates = sum(item["update"] for item in devices)
+
+    available_apps = int(network_status == 200) + int(protect_status == 200)
+    if available_apps == 0:
+        raise FabricError("The API key was accepted by neither Network nor Protect")
+    if offline_devices + offline_cameras:
+        severity, message = "critical", f"{offline_devices + offline_cameras} device(s) offline"
+    elif available_apps < 2:
+        severity, message = "warning", "One UniFi application is unavailable"
+    elif updates:
+        severity, message = "warning", f"{updates} firmware update(s) available"
+    else:
+        severity, message = "healthy", "All systems operational"
+
+    return {
+        "ok": True,
+        "connected": True,
+        "baseUrl": config["baseUrl"],
+        "host": config["hostname"],
+        "site": str(first_value(site, "name", "displayName", default="Default")),
+        "severity": severity,
+        "message": message,
+        "network": {
+            "available": network_status == 200,
+            "devices": devices,
+            "deviceCount": len(devices),
+            "offlineCount": offline_devices,
+            "updateCount": updates,
+            "clientCount": len(clients),
+        },
+        "protect": {
+            "available": protect_status == 200,
+            "cameras": cameras,
+            "cameraCount": len(cameras),
+            "offlineCount": offline_cameras,
+        },
+    }
+
+
+def command_probe(raw_host: str) -> None:
+    base_url, hostname, port = normalize_host(raw_host)
+    pem = fetch_certificate(hostname, port)
+    fingerprint, spki = certificate_identity(pem)
+    saved = read_config()
+    emit({
+        "ok": True,
+        "baseUrl": base_url,
+        "host": hostname,
+        "port": port,
+        "fingerprint": fingerprint,
+        "trusted": bool(saved and saved.get("spki") == spki),
+    })
+
+
+def command_connect(raw_host: str, accepted_fingerprint: str) -> None:
+    key = sys.stdin.readline().strip()
+    if not KEY_PATTERN.fullmatch(key):
+        fail("Enter a valid UniFi API key")
+    base_url, hostname, port = normalize_host(raw_host)
+    pem = fetch_certificate(hostname, port)
+    fingerprint, spki = certificate_identity(pem)
+    if fingerprint != accepted_fingerprint.strip().upper():
+        fail("The console certificate changed; inspect it again before connecting")
+    candidate = {
+        "baseUrl": base_url,
+        "hostname": hostname,
+        "port": port,
+        "fingerprint": fingerprint,
+        "spki": spki,
+    }
+    # Validate before persisting either the connection or the credential.
+    try:
+        summary = build_summary(candidate, key)
+    except FabricError as exc:
+        fail(str(exc))
+    secret_store(key)
+    write_config(candidate)
+    summary["authenticated"] = True
+    emit(summary)
+
+
+def command_connect_cloud() -> None:
+    key = sys.stdin.readline().strip()
+    if not KEY_PATTERN.fullmatch(key):
+        fail("Enter a valid UI Account API key")
+    try:
+        summary = build_cloud_summary(key)
+    except FabricError as exc:
+        fail(str(exc))
+    secret_store(key)
+    write_config({"mode": "cloud", "baseUrl": "https://api.ui.com"})
+    summary["authenticated"] = True
+    emit(summary)
+
+
+def command_summary(demo: bool) -> None:
+    if demo:
+        emit(demo_summary())
+    config = read_config()
+    key = secret_lookup()
+    if not config or not key:
+        fail("Connect UniFi SiteThread to your UI Account", connected=False)
+    try:
+        emit(build_cloud_summary(key) if config.get("mode") == "cloud" else build_summary(config, key))
+    except FabricError as exc:
+        fail(str(exc), connected=True)
+
+
+def command_site(host_id: str, site_id: str) -> None:
+    config = read_config()
+    key = secret_lookup()
+    if not config or not key:
+        fail("UniFi SiteThread is not connected", connected=False)
+    if config.get("mode") != "cloud":
+        fail("Site drill-down is available for UI Account connections")
+    try:
+        emit(build_cloud_site(key, host_id, site_id))
+    except FabricError as exc:
+        fail(str(exc), connected=True)
+
+
+def command_snapshot(camera_id: str, host_id: str | None) -> None:
+    if not ID_PATTERN.fullmatch(camera_id):
+        fail("Invalid camera id")
+    config = read_config()
+    key = secret_lookup()
+    if not config or not key:
+        fail("UniFi SiteThread is not connected", connected=False)
+    private_dir(RUNTIME_DIR)
+    target = RUNTIME_DIR / f"camera-{camera_id}-{os.getpid()}.jpg"
+    if config.get("mode") == "cloud":
+        if not host_id:
+            fail("A site is required for a cloud camera")
+        status = cloud_file_request(
+            key,
+            connector_path(host_id, f"/protect/integration/v1/cameras/{camera_id}/snapshot"),
+            target,
+        )
+    else:
+        status, _ = api_request(config, key, f"/proxy/protect/integration/v1/cameras/{camera_id}/snapshot", output=target)
+    if status != 200 or not target.exists() or target.stat().st_size == 0:
+        target.unlink(missing_ok=True)
+        fail(f"Snapshot failed (HTTP {status})")
+    target.chmod(0o600)
+    emit({"ok": True, "path": str(target)})
+
+
+def command_disconnect() -> None:
+    secret_clear()
+    CONFIG_FILE.unlink(missing_ok=True)
+    LEGACY_CONFIG_FILE.unlink(missing_ok=True)
+    emit({"ok": True, "connected": False})
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="site-thread")
+    sub = parser.add_subparsers(dest="command", required=True)
+    probe = sub.add_parser("probe")
+    probe.add_argument("host")
+    connect = sub.add_parser("connect")
+    connect.add_argument("host")
+    connect.add_argument("fingerprint")
+    sub.add_parser("connect-cloud")
+    summary = sub.add_parser("summary")
+    summary.add_argument("--demo", action="store_true")
+    site = sub.add_parser("site")
+    site.add_argument("host_id")
+    site.add_argument("site_id")
+    snapshot = sub.add_parser("snapshot")
+    snapshot.add_argument("camera_id")
+    snapshot.add_argument("host_id", nargs="?")
+    sub.add_parser("disconnect")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        if args.command == "probe":
+            command_probe(args.host)
+        elif args.command == "connect":
+            command_connect(args.host, args.fingerprint)
+        elif args.command == "connect-cloud":
+            command_connect_cloud()
+        elif args.command == "summary":
+            command_summary(args.demo)
+        elif args.command == "site":
+            command_site(args.host_id, args.site_id)
+        elif args.command == "snapshot":
+            command_snapshot(args.camera_id, args.host_id)
+        elif args.command == "disconnect":
+            command_disconnect()
+    except FabricError as exc:
+        fail(str(exc))
+
+
+if __name__ == "__main__":
+    main()
