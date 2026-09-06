@@ -11,12 +11,16 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
 import ssl
 import subprocess
 import sys
+import time
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
@@ -31,6 +35,18 @@ RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/{APP}-{os.getuid()}"
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{8,4096}$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 HOST_ID_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{1,256}$")
+MAX_STDOUT_BYTES = 1024 * 1024
+MAX_STDERR_BYTES = 64 * 1024
+MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
+MAX_JSON_DEPTH = 20
+MAX_JSON_COLLECTION_ITEMS = 1000
+MAX_JSON_TOTAL_VALUES = 20_000
+MAX_JSON_STRING_CHARS = 4096
+MAX_JSON_KEY_CHARS = 128
+MAX_JSON_NUMBER_ABS = 10**15
+MAX_ROWS_PER_RESPONSE = 500
+MAX_PAGINATED_ROWS = 4000
+MAX_MODEL_ITEMS = 500
 
 
 class FabricError(RuntimeError):
@@ -38,6 +54,7 @@ class FabricError(RuntimeError):
 
 
 def emit(payload: dict[str, Any], exit_code: int = 0) -> None:
+    validate_json_limits(payload)
     print(json.dumps(payload, separators=(",", ":")))
     raise SystemExit(exit_code)
 
@@ -65,6 +82,8 @@ def normalize_host(raw: str) -> tuple[str, str, int]:
     parsed = urlparse(value)
     if parsed.scheme != "https" or not parsed.hostname:
         raise FabricError("Use an HTTPS console address")
+    if len(parsed.hostname) > 253:
+        raise FabricError("The console hostname is too long")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise FabricError("The console address must not contain credentials or query data")
     if parsed.path not in ("", "/"):
@@ -74,18 +93,165 @@ def normalize_host(raw: str) -> tuple[str, str, int]:
     return "https://" + display, parsed.hostname, port
 
 
-def run(command: list[str], *, input_text: str | None = None, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop and reap a child and every process it started."""
     try:
-        return subprocess.run(
+        # Kill the group even if its leader has exited; descendants may still
+        # hold a capture pipe open or continue producing data.
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def run_bytes(
+    command: list[str],
+    *,
+    input_data: bytes | None = None,
+    timeout: int = 15,
+    stdout_limit: int = MAX_STDOUT_BYTES,
+    stderr_limit: int = MAX_STDERR_BYTES,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a child while bounding both captured streams as they are produced."""
+    try:
+        process = subprocess.Popen(
             command,
-            input=input_text,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         raise FabricError(str(exc)) from exc
+
+    assert process.stdout is not None and process.stderr is not None
+    if process.stdin is not None:
+        try:
+            process.stdin.write(input_data or b"")
+            process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    streams: dict[Any, tuple[str, int, bytearray]] = {
+        process.stdout: ("stdout", stdout_limit, bytearray()),
+        process.stderr: ("stderr", stderr_limit, bytearray()),
+    }
+    selector = selectors.DefaultSelector()
+    for stream in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FabricError(f"Command timed out after {timeout} seconds")
+            for key, _ in selector.select(remaining):
+                stream = key.fileobj
+                name, limit, captured = streams[stream]
+                chunk = os.read(stream.fileno(), min(65_536, limit - len(captured) + 1))
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                captured.extend(chunk)
+                if len(captured) > limit:
+                    raise FabricError(f"Command {name} exceeded the {limit}-byte safety limit")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise FabricError(f"Command timed out after {timeout} seconds")
+        returncode = process.wait(timeout=remaining)
+    except FabricError:
+        terminate_process_group(process)
+        raise
+    except subprocess.TimeoutExpired as exc:
+        terminate_process_group(process)
+        raise FabricError(f"Command timed out after {timeout} seconds") from exc
+    except OSError as exc:
+        terminate_process_group(process)
+        raise FabricError(f"Could not capture command output: {exc}") from exc
+    finally:
+        selector.close()
+        for stream in streams:
+            if not stream.closed:
+                stream.close()
+
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        stdout=bytes(streams[process.stdout][2]),
+        stderr=bytes(streams[process.stderr][2]),
+    )
+
+
+def run(
+    command: list[str],
+    *,
+    input_text: str | None = None,
+    timeout: int = 15,
+    stdout_limit: int = MAX_STDOUT_BYTES,
+    stderr_limit: int = MAX_STDERR_BYTES,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = run_bytes(
+            command,
+            input_data=input_text.encode() if input_text is not None else None,
+            timeout=timeout,
+            stdout_limit=stdout_limit,
+            stderr_limit=stderr_limit,
+        )
+        return subprocess.CompletedProcess(
+            result.args,
+            result.returncode,
+            stdout=result.stdout.decode("utf-8", errors="replace"),
+            stderr=result.stderr.decode("utf-8", errors="replace"),
+        )
+    except OSError as exc:
+        raise FabricError(str(exc)) from exc
+
+
+def validate_json_limits(payload: Any) -> None:
+    """Reject decoded responses whose shape is too costly to retain or traverse."""
+    pending: list[tuple[Any, int]] = [(payload, 0)]
+    seen = 0
+    while pending:
+        value, depth = pending.pop()
+        seen += 1
+        if seen > MAX_JSON_TOTAL_VALUES:
+            raise FabricError("The server returned too many JSON values")
+        if depth > MAX_JSON_DEPTH:
+            raise FabricError("The server returned JSON nested too deeply")
+        if isinstance(value, str):
+            if len(value) > MAX_JSON_STRING_CHARS:
+                raise FabricError("The server returned an oversized JSON string")
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not math.isfinite(value) or abs(value) > MAX_JSON_NUMBER_ABS:
+                raise FabricError("The server returned an out-of-range JSON number")
+        elif isinstance(value, list):
+            if len(value) > MAX_JSON_COLLECTION_ITEMS:
+                raise FabricError("The server returned an oversized JSON array")
+            pending.extend((child, depth + 1) for child in value)
+        elif isinstance(value, dict):
+            if len(value) > MAX_JSON_COLLECTION_ITEMS:
+                raise FabricError("The server returned an oversized JSON object")
+            for key, child in value.items():
+                if not isinstance(key, str) or len(key) > MAX_JSON_KEY_CHARS:
+                    raise FabricError("The server returned an invalid JSON field name")
+                pending.append((child, depth + 1))
+
+
+def decode_json(body: str) -> Any:
+    if not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    except (RecursionError, ValueError) as exc:
+        raise FabricError("The server returned overly complex JSON") from exc
+    validate_json_limits(payload)
+    return payload
 
 
 def fetch_certificate(hostname: str, port: int) -> str:
@@ -113,17 +279,14 @@ def certificate_identity(pem: str) -> tuple[str, str]:
     fingerprint = hashlib.sha256(der).hexdigest().upper()
     pretty = ":".join(fingerprint[index:index + 2] for index in range(0, len(fingerprint), 2))
 
-    try:
-        pubkey = subprocess.run(
-            ["openssl", "x509", "-pubkey", "-noout"],
-            input=pem.encode(), capture_output=True, timeout=10, check=False,
-        )
-        encoded = subprocess.run(
-            ["openssl", "pkey", "-pubin", "-outform", "DER"],
-            input=pubkey.stdout, capture_output=True, timeout=10, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise FabricError("Could not read the console public key") from exc
+    pubkey = run_bytes(
+        ["openssl", "x509", "-pubkey", "-noout"], input_data=pem.encode(), timeout=10,
+        stdout_limit=64 * 1024,
+    )
+    encoded = run_bytes(
+        ["openssl", "pkey", "-pubin", "-outform", "DER"], input_data=pubkey.stdout, timeout=10,
+        stdout_limit=64 * 1024,
+    )
     if pubkey.returncode != 0 or encoded.returncode != 0 or not encoded.stdout:
         raise FabricError("Could not pin the console public key")
     spki = base64.b64encode(hashlib.sha256(encoded.stdout).digest()).decode("ascii")
@@ -133,8 +296,14 @@ def certificate_identity(pem: str) -> tuple[str, str]:
 def read_config() -> dict[str, Any] | None:
     for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
         try:
+            if path.stat().st_size > 64 * 1024:
+                continue
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            validate_json_limits(data)
+        except FabricError:
             continue
         if data.get("mode") == "cloud" and data.get("baseUrl") == "https://api.ui.com":
             return data
@@ -185,10 +354,12 @@ def api_request(config: dict[str, Any], key: str, path: str, *, output: Path | N
         "--config", "-", "--max-time", "12", "-w", "\n%{http_code}",
     ]
     if output is not None:
-        args.extend(["-o", str(output)])
+        args.extend(["--max-filesize", str(MAX_SNAPSHOT_BYTES), "-o", str(output)])
     args.append(url)
     result = run(args, input_text=f'header = "X-API-KEY: {key}"\n', timeout=18)
     if result.returncode != 0:
+        if output is not None:
+            output.unlink(missing_ok=True)
         raise FabricError("The UniFi console could not be reached securely")
     lines = result.stdout.rstrip("\n").split("\n")
     try:
@@ -200,11 +371,7 @@ def api_request(config: dict[str, Any], key: str, path: str, *, output: Path | N
 
 def json_request(config: dict[str, Any], key: str, path: str) -> tuple[int, Any]:
     status, body = api_request(config, key, path)
-    try:
-        payload = json.loads(body) if body else None
-    except json.JSONDecodeError:
-        payload = None
-    return status, payload
+    return status, decode_json(body)
 
 
 def cloud_json_request(key: str, path: str) -> tuple[int, Any]:
@@ -224,11 +391,7 @@ def cloud_json_request(key: str, path: str) -> tuple[int, Any]:
     except (IndexError, ValueError) as exc:
         raise FabricError("UniFi Site Manager returned an invalid response") from exc
     body = "\n".join(lines[:-1])
-    try:
-        payload = json.loads(body) if body else None
-    except json.JSONDecodeError:
-        payload = None
-    return status, payload
+    return status, decode_json(body)
 
 
 def connector_path(host_id: str, path: str) -> str:
@@ -243,11 +406,15 @@ def cloud_file_request(key: str, path: str, output: Path) -> int:
     result = run(
         [
             "curl", "-sS", "--max-time", "15", "--config", "-",
-            "-o", str(output), "-w", "%{http_code}", "https://api.ui.com" + path,
+            "--max-filesize", str(MAX_SNAPSHOT_BYTES), "-o", str(output),
+            "-w", "%{http_code}", "https://api.ui.com" + path,
         ],
         input_text=f'header = "X-API-KEY: {key}"\n',
         timeout=20,
     )
+    if result.returncode != 0:
+        output.unlink(missing_ok=True)
+        raise FabricError("UniFi Cloud Connector returned an oversized or invalid response")
     try:
         return int(result.stdout.strip())
     except ValueError as exc:
@@ -263,23 +430,42 @@ def cloud_rows(key: str, endpoint: str) -> list[dict[str, Any]]:
             query["nextToken"] = token
         status, payload = cloud_json_request(key, endpoint + "?" + urlencode(query))
         if status != 200:
-            message = payload.get("message") if isinstance(payload, dict) else ""
+            raw_message = payload.get("message") if isinstance(payload, dict) else ""
+            message = model_string(raw_message) if isinstance(raw_message, str) else ""
             raise FabricError(message or f"UniFi Site Manager returned HTTP {status}")
-        output.extend(rows(payload))
-        token = str(payload.get("nextToken", "")) if isinstance(payload, dict) else ""
+        page = rows(payload)
+        if len(output) + len(page) > MAX_PAGINATED_ROWS:
+            raise FabricError("UniFi Site Manager returned too many rows")
+        output.extend(page)
+        token = model_string(payload.get("nextToken", ""), max_length=2048) if isinstance(payload, dict) else ""
         if not token:
             return output
     raise FabricError("UniFi Site Manager pagination did not finish")
 
 
 def rows(payload: Any) -> list[dict[str, Any]]:
+    source: Any = None
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
+        source = payload
+    elif isinstance(payload, dict):
         for key in ("data", "items", "results"):
             if isinstance(payload.get(key), list):
-                return [item for item in payload[key] if isinstance(item, dict)]
-    return []
+                source = payload[key]
+                break
+    if source is None:
+        return []
+    if len(source) > MAX_ROWS_PER_RESPONSE:
+        raise FabricError("The server returned too many rows")
+    return [item for item in source if isinstance(item, dict)]
+
+
+def model_string(value: Any, default: str = "", max_length: int = 256) -> str:
+    if value in (None, ""):
+        value = default
+    rendered = str(value)
+    if len(rendered) > max_length:
+        raise FabricError("The server returned an oversized model field")
+    return rendered
 
 
 def first_value(item: dict[str, Any], *keys: str, default: Any = "") -> Any:
@@ -299,10 +485,10 @@ def is_online(item: dict[str, Any]) -> bool:
 
 def compact_device(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": str(first_value(item, "id", "_id", "mac")),
-        "name": str(first_value(item, "name", "displayName", "model", "shortname", default="UniFi device")),
-        "model": str(first_value(item, "model", "shortname", "type")),
-        "ip": str(first_value(item, "ipAddress", "ip", "lanIp")),
+        "id": model_string(first_value(item, "id", "_id", "mac"), max_length=256),
+        "name": model_string(first_value(item, "name", "displayName", "model", "shortname", default="UniFi device")),
+        "model": model_string(first_value(item, "model", "shortname", "type")),
+        "ip": model_string(first_value(item, "ipAddress", "ip", "lanIp"), max_length=64),
         "online": is_online(item),
         "update": bool(first_value(item, "firmwareUpgradable", "upgradable", "upgradeable", default=False)),
     }
@@ -322,9 +508,9 @@ def nested_number(item: dict[str, Any], *path: str) -> float:
 
 def compact_camera(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        "id": str(first_value(item, "id", "_id")),
-        "name": str(first_value(item, "name", "displayName", default="Camera")),
-        "model": str(first_value(item, "type", "modelKey", "model")),
+        "id": model_string(first_value(item, "id", "_id"), max_length=256),
+        "name": model_string(first_value(item, "name", "displayName", default="Camera")),
+        "model": model_string(first_value(item, "type", "modelKey", "model")),
         "online": is_online(item),
         "recording": bool(first_value(item, "isRecording", "recording", default=True)),
     }
@@ -417,6 +603,8 @@ def demo_summary() -> dict[str, Any]:
 
 def build_cloud_summary(key: str) -> dict[str, Any]:
     raw_sites = cloud_rows(key, "/v1/sites")
+    if len(raw_sites) > MAX_MODEL_ITEMS:
+        raise FabricError("UniFi Site Manager returned too many sites")
     try:
         raw_hosts = cloud_rows(key, "/v1/hosts")
     except FabricError:
@@ -428,14 +616,14 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
 
     host_names: dict[str, str] = {}
     host_online = {
-        str(first_value(host, "id", "hostId")): host_is_online(host)
+        model_string(first_value(host, "id", "hostId"), max_length=256): host_is_online(host)
         for host in raw_hosts
         if first_value(host, "id", "hostId")
     }
     flattened: list[dict[str, Any]] = []
     for group in raw_groups:
-        host_id = str(first_value(group, "hostId", "id"))
-        host_name = str(first_value(group, "hostName", "name"))
+        host_id = model_string(first_value(group, "hostId", "id"), max_length=256)
+        host_name = model_string(first_value(group, "hostName", "name"))
         if host_id and host_name:
             host_names[host_id] = host_name
         members = group.get("devices")
@@ -448,6 +636,8 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
                     flattened.append(copy)
         else:
             flattened.append(group)
+        if len(flattened) > MAX_MODEL_ITEMS:
+            raise FabricError("UniFi Site Manager returned too many devices")
 
     sites: list[dict[str, Any]] = []
     total_devices = total_clients = total_offline = total_updates = 0
@@ -457,8 +647,8 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
         counts = stats.get("counts") if isinstance(stats.get("counts"), dict) else {}
         percentages = stats.get("percentages") if isinstance(stats.get("percentages"), dict) else {}
         isp_info = stats.get("ispInfo") if isinstance(stats.get("ispInfo"), dict) else {}
-        host_id = str(first_value(item, "hostId"))
-        raw_name = str(first_value(meta, "desc", "name", default="Site"))
+        host_id = model_string(first_value(item, "hostId"), max_length=256)
+        raw_name = model_string(first_value(meta, "desc", "name", default="Site"))
         name = host_names.get(host_id, raw_name) if raw_name.lower() == "default" else raw_name
         device_count = int(nested_number(counts, "totalDevice"))
         client_count = int(sum(nested_number(counts, key) for key in ("wifiClient", "wiredClient", "guestClient")))
@@ -472,17 +662,17 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
         if host_id in host_online and not host_online[host_id]:
             status, status_text = "down", "Site unreachable"
         sites.append({
-            "id": str(first_value(item, "siteId", "id")),
+            "id": model_string(first_value(item, "siteId", "id"), max_length=128),
             "hostId": host_id,
             "name": name,
-            "isp": str(first_value(isp_info, "name", "organization")),
-            "timezone": str(first_value(meta, "timezone")),
+            "isp": model_string(first_value(isp_info, "name", "organization")),
+            "timezone": model_string(first_value(meta, "timezone"), max_length=128),
             "deviceCount": device_count,
             "clientCount": client_count,
             "offlineCount": offline_count,
             "updateCount": update_count,
             "wanUptime": nested_number(percentages, "wanUptime"),
-            "permission": str(first_value(item, "permission", default="viewer")),
+            "permission": model_string(first_value(item, "permission", default="viewer"), max_length=64),
             "owner": bool(item.get("isOwner", False)),
             "status": status,
             "statusText": status_text,
@@ -490,7 +680,7 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
 
     sites.sort(key=site_sort_key)
 
-    devices = [compact_device(item) | {"site": str(first_value(item, "hostName"))} for item in flattened]
+    devices = [compact_device(item) | {"site": model_string(first_value(item, "hostName"))} for item in flattened]
     camera_words = ("camera", "protect", "doorbell", "ai pro", "g3", "g4", "g5", "uvc")
     camera_items = [
         item for item in flattened
@@ -538,12 +728,12 @@ def build_cloud_site(key: str, host_id: str, site_id: str) -> dict[str, Any]:
         raise FabricError(f"This site's Network application is unavailable (HTTP {site_status})")
     network_sites = rows(sites_payload)
     chosen = next(
-        (item for item in network_sites if str(first_value(item, "id", "siteId", "_id")) == site_id),
+        (item for item in network_sites if model_string(first_value(item, "id", "siteId", "_id"), max_length=128) == site_id),
         network_sites[0] if len(network_sites) == 1 else None,
     )
     if not chosen:
         raise FabricError("UniFi Cloud Connector could not match this Network site")
-    local_site_id = str(first_value(chosen, "id", "siteId", "_id"))
+    local_site_id = model_string(first_value(chosen, "id", "siteId", "_id"), max_length=128)
     if not ID_PATTERN.fullmatch(local_site_id):
         raise FabricError("The console returned an invalid Network site id")
 
@@ -572,7 +762,7 @@ def build_cloud_site(key: str, host_id: str, site_id: str) -> dict[str, Any]:
         "siteId": site_id,
         "site": {
             "id": local_site_id,
-            "name": str(first_value(chosen, "name", "displayName", default="UniFi site")),
+            "name": model_string(first_value(chosen, "name", "displayName", default="UniFi site")),
         },
         "network": {
             "available": True,
@@ -598,7 +788,7 @@ def build_summary(config: dict[str, Any], key: str) -> dict[str, Any]:
 
     sites = rows(sites_payload) if network_status == 200 else []
     site = sites[0] if sites else {}
-    site_id = str(first_value(site, "id", "siteId", "_id"))
+    site_id = model_string(first_value(site, "id", "siteId", "_id"), max_length=128)
     devices: list[dict[str, Any]] = []
     clients: list[dict[str, Any]] = []
     if site_id:
@@ -631,7 +821,7 @@ def build_summary(config: dict[str, Any], key: str) -> dict[str, Any]:
         "connected": True,
         "baseUrl": config["baseUrl"],
         "host": config["hostname"],
-        "site": str(first_value(site, "name", "displayName", default="Default")),
+        "site": model_string(first_value(site, "name", "displayName", default="Default")),
         "severity": severity,
         "message": message,
         "network": {

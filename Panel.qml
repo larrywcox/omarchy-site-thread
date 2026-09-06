@@ -492,7 +492,7 @@ Panel {
     height: Style.space(15)
     radius: height / 2
     color: root.urgent
-    Text {
+    Text { textFormat: Text.PlainText;
       id: badgeText
       anchors.centerIn: parent
       text: String(root.alertCount)
@@ -539,7 +539,7 @@ Panel {
             size: Style.space(28)
             onClicked: root.backToSites()
           }
-          Text {
+          Text { textFormat: Text.PlainText;
             text: "\uf233"
             color: "#ffffff"
             font.family: root.fontFamily
@@ -549,14 +549,14 @@ Panel {
           Column {
             width: parent.width - Style.space(root.inSite ? 140 : 100)
             spacing: Style.space(2)
-            Text {
+            Text { textFormat: Text.PlainText;
               text: root.inSite ? Model.safe(root.selectedSite.name, "UNIFI SITE") : "UNIFI SITETHREAD"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
             }
-            Text {
+            Text { textFormat: Text.PlainText;
               text: root.inSite
                 ? Model.safe(root.selectedSite.statusText, "Live site view")
                 : (root.connected ? Model.summarySubtitle(root.data) : "Network + Protect")
@@ -584,11 +584,10 @@ Panel {
           }
         }
 
-        Text {
+        Text { textFormat: Text.PlainText;
           visible: root.notice !== ""
           width: parent.width
           text: root.notice
-          textFormat: Text.PlainText
           wrapMode: Text.WordWrap
           horizontalAlignment: Text.AlignHCenter
           color: root.notice.indexOf("failed") >= 0 || root.notice.indexOf("invalid") >= 0 ? root.urgent : root.dim
@@ -608,7 +607,7 @@ Panel {
             fontFamily: root.fontFamily
           }
 
-          Text {
+          Text { textFormat: Text.PlainText;
             width: parent.width
             text: root.localSetup
               ? "Use this only for a console that is not available through your UI Account. The key stays in your encrypted desktop credential store."
@@ -634,10 +633,10 @@ Panel {
                 color: signInArea.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
                 border.width: 1
                 border.color: root.accent
-                Text { id: signInText; anchors.centerIn: parent; text: "Sign in at unifi.ui.com"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+                Text { textFormat: Text.PlainText; id: signInText; anchors.centerIn: parent; text: "Sign in at unifi.ui.com"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
                 MouseArea { id: signInArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.openAccount() }
               }
-              Text {
+              Text { textFormat: Text.PlainText;
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Then open Settings → API Keys → Create New API Key"
                 color: root.dim
@@ -657,7 +656,7 @@ Panel {
               Keys.onReturnPressed: root.connectCloud()
             }
 
-            Text {
+            Text { textFormat: Text.PlainText;
               width: parent.width
               text: pasteProc.running && !root.pasteForLocalConsole ? "Pasting…" : "Paste API key from clipboard"
               color: root.accent
@@ -684,10 +683,10 @@ Panel {
                 radius: Style.cornerRadius
                 opacity: cloudKeyField.text !== "" ? 1 : 0.45
                 color: root.accent
-                Text { id: cloudConnectText; anchors.centerIn: parent; text: cloudConnectProc.running ? "Connecting…" : "Connect all sites"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+                Text { textFormat: Text.PlainText; id: cloudConnectText; anchors.centerIn: parent; text: cloudConnectProc.running ? "Connecting…" : "Connect all sites"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
                 MouseArea { anchors.fill: parent; enabled: cloudKeyField.text !== "" && !cloudConnectProc.running; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: root.connectCloud() }
               }
-              Text {
+              Text { textFormat: Text.PlainText;
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Includes sites shared with your UI Account"
                 color: root.dim
@@ -696,7 +695,7 @@ Panel {
               }
             }
 
-            Text {
+            Text { textFormat: Text.PlainText;
               width: parent.width
               text: "Use a local console connection instead"
               color: root.accent
@@ -734,7 +733,7 @@ Panel {
               color: inspectArea.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
               border.width: 1
               border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
-              Text {
+              Text { textFormat: Text.PlainText;
                 id: inspectText
                 anchors.centerIn: parent
                 text: probeProc.running ? "Inspecting…" : "Inspect certificate"
@@ -751,7 +750,7 @@ Panel {
                 onClicked: root.inspectCertificate()
               }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
               anchors.verticalCenter: parent.verticalCenter
               text: "No credential is sent during this check"
               color: root.dim
@@ -774,14 +773,14 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               anchors.margins: Style.space(10)
               spacing: Style.space(8)
-              Text {
+              Text { textFormat: Text.PlainText;
                 text: "CONSOLE CERTIFICATE · SHA-256"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
               }
-              Text {
+              Text { textFormat: Text.PlainText;
                 width: parent.width
                 text: root.probeFingerprint
                 color: root.foreground
@@ -798,7 +797,7 @@ Panel {
                   color: root.certificateAccepted ? root.accent : "transparent"
                   border.width: 1
                   border.color: root.certificateAccepted ? root.accent : root.dim
-                  Text {
+                  Text { textFormat: Text.PlainText;
                     anchors.centerIn: parent
                     visible: root.certificateAccepted
                     text: "✓"
@@ -811,7 +810,7 @@ Panel {
                     onClicked: root.certificateAccepted = !root.certificateAccepted
                   }
                 }
-                Text {
+                Text { textFormat: Text.PlainText;
                   width: fingerprintColumn.width - Style.space(35)
                   text: "I verified this fingerprint in UniFi Console → Settings → System → Advanced"
                   wrapMode: Text.WordWrap
@@ -835,7 +834,7 @@ Panel {
             Keys.onReturnPressed: root.connect()
           }
 
-          Text {
+          Text { textFormat: Text.PlainText;
             visible: root.localSetup && root.probeFingerprint !== ""
             width: parent.width
             text: pasteProc.running && root.pasteForLocalConsole ? "Pasting…" : "Paste API key from clipboard"
@@ -864,7 +863,7 @@ Panel {
               radius: Style.cornerRadius
               opacity: root.certificateAccepted && apiKeyField.text !== "" ? 1 : 0.45
               color: root.accent
-              Text {
+              Text { textFormat: Text.PlainText;
                 id: connectText
                 anchors.centerIn: parent
                 text: connectProc.running ? "Connecting…" : "Connect securely"
@@ -882,7 +881,7 @@ Panel {
             }
           }
 
-          Text {
+          Text { textFormat: Text.PlainText;
             visible: root.localSetup
             width: parent.width
             text: "Use UI Account to show all sites"
@@ -916,7 +915,7 @@ Panel {
                   : Style.normalFillFor(root.foreground, root.accent)
                 border.width: root.activeTab === index ? 1 : 0
                 border.color: root.accent
-                Text {
+                Text { textFormat: Text.PlainText;
                   anchors.centerIn: parent
                   text: Model.tabLabel(index, root.cloudMode)
                   color: root.foreground
@@ -952,7 +951,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.margins: Style.space(12)
                 spacing: Style.space(12)
-                Text {
+                Text { textFormat: Text.PlainText;
                   text: Model.severityIcon(root.severity)
                   color: root.severity === "critical" ? root.urgent : root.foreground
                   font.family: root.fontFamily
@@ -960,14 +959,14 @@ Panel {
                 }
                 Column {
                   width: parent.width - Style.space(50)
-                  Text {
+                  Text { textFormat: Text.PlainText;
                     text: root.severity === "healthy" ? "All sites healthy" : (root.severity === "critical" ? "Attention required" : "UniFi SiteThread notice")
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.title
                     font.bold: true
                   }
-                  Text {
+                  Text { textFormat: Text.PlainText;
                     text: Model.safe(root.data.message, "Connected")
                     color: root.dim
                     font.family: root.fontFamily
@@ -996,7 +995,7 @@ Panel {
                           color: root.siteAttentionColor(modelData)
                           anchors.verticalCenter: parent.verticalCenter
                         }
-                        Text {
+                        Text { textFormat: Text.PlainText;
                           width: parent.width - attentionState.implicitWidth - Style.space(25)
                           text: Model.safe(modelData.name, "UniFi site")
                           elide: Text.ElideRight
@@ -1005,7 +1004,7 @@ Panel {
                           font.pixelSize: Style.font.bodySmall
                           font.bold: true
                         }
-                        Text {
+                        Text { textFormat: Text.PlainText;
                           id: attentionState
                           text: String(modelData.status || "up") !== "up"
                             ? String(modelData.statusText || "Needs attention")
@@ -1056,9 +1055,9 @@ Panel {
                     id: statColumn
                     anchors.centerIn: parent
                     spacing: Style.space(3)
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.icon; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: String(modelData.value); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: modelData.icon; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
+                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: String(modelData.value); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                   }
                   MouseArea {
                     anchors.fill: parent
@@ -1112,10 +1111,10 @@ Panel {
                     }
                     Column {
                       width: parent.width - overviewSiteValue.implicitWidth - Style.space(30)
-                      Text { width: parent.width; text: Model.safe(modelData.name, "UniFi site"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
-                      Text { width: parent.width; text: Model.safe(modelData.isp, "") + (modelData.isp ? "  ·  " : "") + Model.safe(modelData.statusText, "Online"); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "UniFi site"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.isp, "") + (modelData.isp ? "  ·  " : "") + Model.safe(modelData.statusText, "Online"); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                     }
-                    Text {
+                    Text { textFormat: Text.PlainText;
                       id: overviewSiteValue
                       text: root.overviewSelection === "clients"
                         ? String(modelData.clientCount || 0) + " CLIENTS"
@@ -1157,15 +1156,15 @@ Panel {
                     Rectangle { width: Style.space(9); height: width; radius: width / 2; color: modelData.online ? root.healthy : root.urgent; anchors.verticalCenter: parent.verticalCenter }
                     Column {
                       width: parent.width - Style.space(125)
-                      Text { width: parent.width; text: Model.safe(modelData.name, root.overviewSelection === "cameras" ? "Camera" : "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
-                      Text { width: parent.width; text: Model.safe(modelData.site, Model.safe(modelData.model, "")); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, root.overviewSelection === "cameras" ? "Camera" : "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.site, Model.safe(modelData.model, "")); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                     }
-                    Text { text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    Text { textFormat: Text.PlainText; text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
                   }
                 }
               }
 
-              Text {
+              Text { textFormat: Text.PlainText;
                 visible: root.overviewSiteItems(root.overviewSelection).length === 0
                   && root.overviewDeviceItems(root.overviewSelection).length === 0
                 width: parent.width
@@ -1215,8 +1214,8 @@ Panel {
                   }
                   Column {
                     width: parent.width - Style.space(root.cloudMode ? 250 : 130)
-                    Text { text: Model.safe(modelData.name, root.cloudMode ? "UniFi site" : "UniFi device"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-                    Text {
+                    Text { textFormat: Text.PlainText; text: Model.safe(modelData.name, root.cloudMode ? "UniFi site" : "UniFi device"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+                    Text { textFormat: Text.PlainText;
                       text: root.cloudMode
                         ? String(modelData.deviceCount || 0) + " devices  ·  " + String(modelData.clientCount || 0) + " clients" + (modelData.isp ? "  ·  " + Model.safe(modelData.isp, "") : "") + "  ·  WAN " + Number(modelData.wanUptime || 0).toFixed(2) + "%"
                         : Model.safe(modelData.model, "") + (modelData.ip ? "  ·  " + Model.safe(modelData.ip, "") : "")
@@ -1225,8 +1224,8 @@ Panel {
                       font.pixelSize: Style.font.caption
                     }
                   }
-                  Text { visible: !root.cloudMode && modelData.update === true; text: "UPDATE"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  Text {
+                  Text { textFormat: Text.PlainText; visible: !root.cloudMode && modelData.update === true; text: "UPDATE"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                  Text { textFormat: Text.PlainText;
                     text: root.cloudMode
                       ? String(modelData.statusText || "Online").toUpperCase()
                       : (modelData.online ? "ONLINE" : "OFFLINE")
@@ -1241,7 +1240,7 @@ Panel {
                 MouseArea { anchors.fill: parent; enabled: root.cloudMode; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: root.openSite(modelData) }
               }
             }
-            Text { visible: !root.data.network || !root.data.network.available; width: parent.width; text: "UniFi Network is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+            Text { textFormat: Text.PlainText; visible: !root.data.network || !root.data.network.available; width: parent.width; text: "UniFi Network is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
           }
 
           Column {
@@ -1258,7 +1257,7 @@ Panel {
               color: Qt.rgba(0, 0, 0, 0.35)
               clip: true
               Image { anchors.fill: parent; source: root.snapshotPath; fillMode: Image.PreserveAspectCrop; cache: false; asynchronous: true }
-              Text { anchors.centerIn: parent; visible: root.snapshotPath === ""; text: root.cloudMode ? "Open Site Manager for live video" : "Loading " + root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+              Text { textFormat: Text.PlainText; anchors.centerIn: parent; visible: root.snapshotPath === ""; text: root.cloudMode ? "Open Site Manager for live video" : "Loading " + root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
               Rectangle {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
@@ -1267,7 +1266,7 @@ Panel {
                 height: cameraLabel.implicitHeight + Style.space(6)
                 radius: height / 2
                 color: Qt.rgba(0, 0, 0, 0.62)
-                Text { id: cameraLabel; anchors.centerIn: parent; text: root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                Text { textFormat: Text.PlainText; id: cameraLabel; anchors.centerIn: parent; text: root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
               }
             }
 
@@ -1287,14 +1286,14 @@ Panel {
                   Column {
                     anchors.centerIn: parent
                     width: parent.width - Style.space(12)
-                    Text { width: parent.width; text: Model.safe(modelData.name, "Camera"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
-                    Text { width: parent.width; text: modelData.online ? "ONLINE" : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignHCenter }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "Camera"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: modelData.online ? "ONLINE" : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignHCenter }
                   }
                   MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectCamera(modelData) }
                 }
               }
             }
-            Text { visible: !root.data.protect || !root.data.protect.available; width: parent.width; text: root.cloudMode ? "Site Manager did not report Protect devices for this account" : "UniFi Protect is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+            Text { textFormat: Text.PlainText; visible: !root.data.protect || !root.data.protect.available; width: parent.width; text: root.cloudMode ? "Site Manager did not report Protect devices for this account" : "UniFi Protect is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
           }
 
           Rectangle { width: parent.width; height: 1; color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.1) }
@@ -1302,7 +1301,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.space(10)
-            Text {
+            Text { textFormat: Text.PlainText;
               width: parent.width - disconnectButton.width - Style.space(10)
               text: root.cloudMode ? "UI Account key stored securely in Secret Service" : "Credentials stored securely in Secret Service"
               color: root.dim
@@ -1316,7 +1315,7 @@ Panel {
               height: Style.space(30)
               radius: Style.cornerRadius
               color: disconnectArea.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : "transparent"
-              Text { id: disconnectText; anchors.centerIn: parent; text: root.confirmDisconnect ? "Click again to forget" : "Disconnect"; color: root.confirmDisconnect ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Text { textFormat: Text.PlainText; id: disconnectText; anchors.centerIn: parent; text: root.confirmDisconnect ? "Click again to forget" : "Disconnect"; color: root.confirmDisconnect ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
               MouseArea {
                 id: disconnectArea
                 anchors.fill: parent
@@ -1358,8 +1357,8 @@ Panel {
               }
               Column {
                 width: parent.width - Style.space(32)
-                Text { text: Model.safe(root.selectedSite ? root.selectedSite.statusText : "", "Online"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-                Text {
+                Text { textFormat: Text.PlainText; text: Model.safe(root.selectedSite ? root.selectedSite.statusText : "", "Online"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+                Text { textFormat: Text.PlainText;
                   text: (root.selectedSite && root.selectedSite.isp ? Model.safe(root.selectedSite.isp, "") + "  ·  " : "") + "Live data from this UniFi console"
                   color: root.dim
                   font.family: root.fontFamily
@@ -1369,7 +1368,7 @@ Panel {
             }
           }
 
-          Text {
+          Text { textFormat: Text.PlainText;
             visible: root.siteLoading
             width: parent.width
             text: "Loading live site data…"
@@ -1393,7 +1392,7 @@ Panel {
                 color: root.siteTab === index ? Style.selectedFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
                 border.width: root.siteTab === index ? 1 : 0
                 border.color: root.accent
-                Text {
+                Text { textFormat: Text.PlainText;
                   anchors.centerIn: parent
                   text: index === 0 ? "Network" : "Protect"
                   color: root.foreground
@@ -1428,8 +1427,8 @@ Panel {
                   id: siteStat
                   anchors.centerIn: parent
                   spacing: Style.space(2)
-                  Text { anchors.horizontalCenter: parent.horizontalCenter; text: String(modelData.value); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
-                  Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                  Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: String(modelData.value); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+                  Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                 }
               }
             }
@@ -1459,14 +1458,14 @@ Panel {
                   Rectangle { width: Style.space(9); height: width; radius: width / 2; color: modelData.online ? root.healthy : root.urgent; anchors.verticalCenter: parent.verticalCenter }
                   Column {
                     width: parent.width - Style.space(125)
-                    Text { width: parent.width; text: Model.safe(modelData.name, "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-                    Text { width: parent.width; text: Model.safe(modelData.model, "") + (modelData.ip ? "  ·  " + Model.safe(modelData.ip, "") : ""); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.model, "") + (modelData.ip ? "  ·  " + Model.safe(modelData.ip, "") : ""); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                   }
-                  Text { text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                  Text { textFormat: Text.PlainText; text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
                 }
               }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
               visible: !root.siteData.network || root.siteData.network.devices.length === 0
               width: parent.width
               text: "No Network devices were returned for this site"
@@ -1490,7 +1489,7 @@ Panel {
               color: Qt.rgba(0, 0, 0, 0.45)
               clip: true
               Image { anchors.fill: parent; source: root.snapshotPath; fillMode: Image.PreserveAspectFit; cache: false; asynchronous: true }
-              Text { anchors.centerIn: parent; visible: root.snapshotPath === ""; text: "Loading " + root.selectedCameraName + "…"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+              Text { textFormat: Text.PlainText; anchors.centerIn: parent; visible: root.snapshotPath === ""; text: "Loading " + root.selectedCameraName + "…"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
               Rectangle {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
@@ -1499,7 +1498,7 @@ Panel {
                 height: liveCameraLabel.implicitHeight + Style.space(7)
                 radius: height / 2
                 color: Qt.rgba(0, 0, 0, 0.68)
-                Text { id: liveCameraLabel; anchors.centerIn: parent; text: "LIVE · " + root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                Text { textFormat: Text.PlainText; id: liveCameraLabel; anchors.centerIn: parent; text: "LIVE · " + root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
               }
             }
             Flow {
@@ -1518,14 +1517,14 @@ Panel {
                   Column {
                     anchors.centerIn: parent
                     width: parent.width - Style.space(10)
-                    Text { width: parent.width; text: Model.safe(modelData.name, "Camera"); elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
-                    Text { width: parent.width; text: modelData.online ? "ONLINE" : "OFFLINE"; horizontalAlignment: Text.AlignHCenter; color: modelData.online ? root.healthy : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "Camera"); elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
+                    Text { textFormat: Text.PlainText; width: parent.width; text: modelData.online ? "ONLINE" : "OFFLINE"; horizontalAlignment: Text.AlignHCenter; color: modelData.online ? root.healthy : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
                   }
                   MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectCamera(modelData) }
                 }
               }
             }
-            Text {
+            Text { textFormat: Text.PlainText;
               visible: root.siteProtectInstalled && root.siteData.protect.cameras.length === 0
               width: parent.width
               text: "Protect is installed, but no cameras were returned"

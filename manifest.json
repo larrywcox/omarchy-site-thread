@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "larrywcox.site-thread",
   "name": "UniFi SiteThread",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "author": "Larry Cox",
   "description": "Fleet-wide UniFi Site Manager with in-panel Network and Protect site views.",
   "homepage": "https://github.com/larrywcox/omarchy-site-thread",

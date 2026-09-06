@@ -3,7 +3,7 @@
 UniFi SiteThread is a unified UniFi Network and Protect operations panel for the
 Omarchy top bar.
 
-Version 0.4.6 provides:
+Version 0.4.7 provides:
 
 - A health-aware bar icon with offline-device badges.
 - A browser-based UI Account sign-in handoff and masked API-key entry.
@@ -30,6 +30,8 @@ Version 0.4.6 provides:
 - Overview cards for devices, clients, cameras, updates, and offline equipment.
 - Network device inventory and health.
 - Protect camera inventory and live snapshot refresh while the panel is open.
+- Bounded API responses and JSON models to prevent remote memory exhaustion.
+- Plain-text rendering for all externally sourced labels.
 
 ## Security model
 
