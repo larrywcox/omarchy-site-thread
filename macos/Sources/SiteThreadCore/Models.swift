@@ -37,7 +37,10 @@ public func modelString(
     if let text = source as? String, text.isEmpty { source = fallback }
     let rendered = stringify(source)
     if rendered.count > maxLength {
-        throw SiteThreadError("The server returned an oversized model field")
+        throw SiteThreadError(
+            "The server returned an oversized model field "
+                + "(\(rendered.count) > \(maxLength) characters)"
+        )
     }
     return rendered
 }
@@ -68,7 +71,10 @@ public func rows(_ payload: Any?) throws -> [[String: Any]] {
     }
     guard let items = source else { return [] }
     if items.count > Limits.maxRowsPerResponse {
-        throw SiteThreadError("The server returned too many rows")
+        throw SiteThreadError(
+            "The server returned too many rows "
+                + "(\(items.count) > \(Limits.maxRowsPerResponse))"
+        )
     }
     return items.compactMap { $0 as? [String: Any] }
 }

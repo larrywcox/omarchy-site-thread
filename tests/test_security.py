@@ -74,6 +74,87 @@ class JsonLimitTests(unittest.TestCase):
             SITE_THREAD.compact_device({"name": "x" * 257})
 
 
+def fleet_payload(site_count: int) -> dict:
+    """A Site Manager /v1/sites page shaped like the real thing.
+
+    Each site carries a full statistics block, which is the bulk of the JSON
+    value count: counts, percentages, ispInfo, and an internetIssues period
+    array.
+    """
+    return {
+        "data": [
+            {
+                "siteId": f"site{index:04d}",
+                "hostId": f"console-{index:04d}",
+                "isOwner": index % 3 == 0,
+                "permission": "admin",
+                "meta": {
+                    "desc": f"Branch {index}",
+                    "name": f"branch-{index}",
+                    "timezone": "America/Chicago",
+                    "gatewayMac": "aa:bb:cc:dd:ee:ff",
+                },
+                "statistics": {
+                    "counts": {
+                        key: index % 17
+                        for key in (
+                            "totalDevice", "offlineDevice", "gatewayDevice",
+                            "offlineGatewayDevice", "wifiDevice", "wiredDevice",
+                            "pendingUpdateDevice", "wifiClient", "wiredClient",
+                            "guestClient", "criticalNotification",
+                        )
+                    },
+                    "percentages": {"wanUptime": 99.9, "txRetry": 1.2},
+                    "ispInfo": {"name": "Acme Fiber", "organization": "Acme"},
+                    "internetIssues": [
+                        {
+                            "index": period,
+                            "startTimestamp": "2026-09-01T00:00:00Z",
+                            "duration": 12,
+                            "wanDowntime": False,
+                            "wan2FailoverActive": False,
+                            "latencyAvg": 14.2,
+                            "packetLoss": 0.0,
+                        }
+                        for period in range(24)
+                    ],
+                },
+            }
+            for index in range(site_count)
+        ],
+        "nextToken": "",
+    }
+
+
+class FleetSizeTests(unittest.TestCase):
+    """Regression: the bounds must not reject a legitimate large fleet.
+
+    These limits guard against hostile responses, so they have to sit clear of
+    what Site Manager actually returns. An earlier 20,000-value ceiling broke
+    at roughly 74 sites.
+    """
+
+    def test_a_large_fleet_page_is_accepted(self) -> None:
+        payload = fleet_payload(200)
+        body = json.dumps(payload)
+        self.assertLess(len(body), SITE_THREAD.MAX_STDOUT_BYTES)
+        decoded = SITE_THREAD.decode_json(body)
+        self.assertEqual(len(SITE_THREAD.rows(decoded)), 200)
+
+    def test_the_value_ceiling_clears_a_full_page_with_headroom(self) -> None:
+        pending: list = [(fleet_payload(200), 0)]
+        seen = 0
+        while pending:
+            value, depth = pending.pop()
+            seen += 1
+            if isinstance(value, list):
+                pending.extend((child, depth + 1) for child in value)
+            elif isinstance(value, dict):
+                pending.extend((child, depth + 1) for child in value.values())
+        # A full page must not land anywhere near the ceiling.
+        self.assertLess(seen * 4, SITE_THREAD.MAX_JSON_TOTAL_VALUES)
+
+
 class QmlSafetyTests(unittest.TestCase):
     def test_every_text_item_is_plain_text(self) -> None:
         source = (ROOT / "Panel.qml").read_text(encoding="utf-8")

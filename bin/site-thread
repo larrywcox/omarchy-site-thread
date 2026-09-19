@@ -35,18 +35,25 @@ RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/{APP}-{os.getuid()}"
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]{8,4096}$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 HOST_ID_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{1,256}$")
-MAX_STDOUT_BYTES = 1024 * 1024
+# The stdout byte cap is the primary memory guard: nothing larger is ever
+# decoded, so the worst case is bounded before any traversal begins. The
+# counters below are a secondary guard against shapes that are cheap in bytes
+# but expensive to walk, so they sit well clear of what UniFi legitimately
+# returns. A Site Manager /v1/sites page carries each site's full statistics
+# block, which is a few hundred JSON values per site.
+MAX_STDOUT_BYTES = 8 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_JSON_DEPTH = 20
-MAX_JSON_COLLECTION_ITEMS = 1000
-MAX_JSON_TOTAL_VALUES = 20_000
+MAX_JSON_COLLECTION_ITEMS = 20_000
+MAX_JSON_TOTAL_VALUES = 400_000
 MAX_JSON_STRING_CHARS = 4096
 MAX_JSON_KEY_CHARS = 128
 MAX_JSON_NUMBER_ABS = 10**15
-MAX_ROWS_PER_RESPONSE = 500
-MAX_PAGINATED_ROWS = 4000
-MAX_MODEL_ITEMS = 500
+MAX_ROWS_PER_RESPONSE = 1000
+MAX_PAGINATED_ROWS = 20_000
+MAX_MODEL_ITEMS = 5000
+MAX_PAGINATION_PAGES = 100
 
 
 class FabricError(RuntimeError):
@@ -219,22 +226,22 @@ def validate_json_limits(payload: Any) -> None:
         value, depth = pending.pop()
         seen += 1
         if seen > MAX_JSON_TOTAL_VALUES:
-            raise FabricError("The server returned too many JSON values")
+            raise FabricError(f"The server returned too many JSON values (over {MAX_JSON_TOTAL_VALUES})")
         if depth > MAX_JSON_DEPTH:
-            raise FabricError("The server returned JSON nested too deeply")
+            raise FabricError(f"The server returned JSON nested too deeply (over {MAX_JSON_DEPTH} levels)")
         if isinstance(value, str):
             if len(value) > MAX_JSON_STRING_CHARS:
-                raise FabricError("The server returned an oversized JSON string")
+                raise FabricError(f"The server returned an oversized JSON string ({len(value)} > {MAX_JSON_STRING_CHARS} characters)")
         elif isinstance(value, (int, float)) and not isinstance(value, bool):
             if not math.isfinite(value) or abs(value) > MAX_JSON_NUMBER_ABS:
                 raise FabricError("The server returned an out-of-range JSON number")
         elif isinstance(value, list):
             if len(value) > MAX_JSON_COLLECTION_ITEMS:
-                raise FabricError("The server returned an oversized JSON array")
+                raise FabricError(f"The server returned an oversized JSON array ({len(value)} > {MAX_JSON_COLLECTION_ITEMS} items)")
             pending.extend((child, depth + 1) for child in value)
         elif isinstance(value, dict):
             if len(value) > MAX_JSON_COLLECTION_ITEMS:
-                raise FabricError("The server returned an oversized JSON object")
+                raise FabricError(f"The server returned an oversized JSON object ({len(value)} > {MAX_JSON_COLLECTION_ITEMS} fields)")
             for key, child in value.items():
                 if not isinstance(key, str) or len(key) > MAX_JSON_KEY_CHARS:
                     raise FabricError("The server returned an invalid JSON field name")
@@ -424,7 +431,7 @@ def cloud_file_request(key: str, path: str, output: Path) -> int:
 def cloud_rows(key: str, endpoint: str) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     token = ""
-    for _ in range(20):
+    for _ in range(MAX_PAGINATION_PAGES):
         query = {"pageSize": "200"}
         if token:
             query["nextToken"] = token
@@ -435,7 +442,7 @@ def cloud_rows(key: str, endpoint: str) -> list[dict[str, Any]]:
             raise FabricError(message or f"UniFi Site Manager returned HTTP {status}")
         page = rows(payload)
         if len(output) + len(page) > MAX_PAGINATED_ROWS:
-            raise FabricError("UniFi Site Manager returned too many rows")
+            raise FabricError(f"UniFi Site Manager returned too many rows (over {MAX_PAGINATED_ROWS})")
         output.extend(page)
         token = model_string(payload.get("nextToken", ""), max_length=2048) if isinstance(payload, dict) else ""
         if not token:
@@ -455,7 +462,7 @@ def rows(payload: Any) -> list[dict[str, Any]]:
     if source is None:
         return []
     if len(source) > MAX_ROWS_PER_RESPONSE:
-        raise FabricError("The server returned too many rows")
+        raise FabricError(f"The server returned too many rows ({len(source)} > {MAX_ROWS_PER_RESPONSE})")
     return [item for item in source if isinstance(item, dict)]
 
 
@@ -464,7 +471,7 @@ def model_string(value: Any, default: str = "", max_length: int = 256) -> str:
         value = default
     rendered = str(value)
     if len(rendered) > max_length:
-        raise FabricError("The server returned an oversized model field")
+        raise FabricError(f"The server returned an oversized model field ({len(rendered)} > {max_length} characters)")
     return rendered
 
 
@@ -604,7 +611,7 @@ def demo_summary() -> dict[str, Any]:
 def build_cloud_summary(key: str) -> dict[str, Any]:
     raw_sites = cloud_rows(key, "/v1/sites")
     if len(raw_sites) > MAX_MODEL_ITEMS:
-        raise FabricError("UniFi Site Manager returned too many sites")
+        raise FabricError(f"UniFi Site Manager returned too many sites ({len(raw_sites)} > {MAX_MODEL_ITEMS})")
     try:
         raw_hosts = cloud_rows(key, "/v1/hosts")
     except FabricError:
@@ -637,7 +644,7 @@ def build_cloud_summary(key: str) -> dict[str, Any]:
         else:
             flattened.append(group)
         if len(flattened) > MAX_MODEL_ITEMS:
-            raise FabricError("UniFi Site Manager returned too many devices")
+            raise FabricError(f"UniFi Site Manager returned too many devices (over {MAX_MODEL_ITEMS})")
 
     sites: list[dict[str, Any]] = []
     total_devices = total_clients = total_offline = total_updates = 0

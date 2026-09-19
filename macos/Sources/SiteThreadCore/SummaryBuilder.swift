@@ -10,7 +10,10 @@ public enum SummaryBuilder {
     public static func cloudSummary(key: String) async throws -> Summary {
         let rawSites = try await UniFiClient.cloudRows(key: key, endpoint: "/v1/sites")
         if rawSites.count > Limits.maxModelItems {
-            throw SiteThreadError("UniFi Site Manager returned too many sites")
+            throw SiteThreadError(
+                "UniFi Site Manager returned too many sites "
+                    + "(\(rawSites.count) > \(Limits.maxModelItems))"
+            )
         }
         let rawHosts = (try? await UniFiClient.cloudRows(key: key, endpoint: "/v1/hosts")) ?? []
         let rawGroups = (try? await UniFiClient.cloudRows(key: key, endpoint: "/v1/devices")) ?? []
@@ -39,7 +42,10 @@ public enum SummaryBuilder {
                 flattened.append(group)
             }
             if flattened.count > Limits.maxModelItems {
-                throw SiteThreadError("UniFi Site Manager returned too many devices")
+                throw SiteThreadError(
+                    "UniFi Site Manager returned too many devices "
+                        + "(over \(Limits.maxModelItems))"
+                )
             }
         }
 

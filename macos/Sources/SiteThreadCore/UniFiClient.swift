@@ -194,7 +194,10 @@ public enum UniFiClient {
             throw SiteThreadError(failureMessage)
         }
         if response.expectedContentLength > Int64(byteLimit) || result.0.count > byteLimit {
-            throw SiteThreadError("The server returned an oversized response")
+            throw SiteThreadError(
+                "The server returned an oversized response "
+                    + "(over \(byteLimit) bytes)"
+            )
         }
         return (response.statusCode, result.0)
     }
@@ -263,7 +266,10 @@ public enum UniFiClient {
             }
             let page = try rows(response.1)
             if output.count + page.count > Limits.maxPaginatedRows {
-                throw SiteThreadError("UniFi Site Manager returned too many rows")
+                throw SiteThreadError(
+                    "UniFi Site Manager returned too many rows "
+                        + "(over \(Limits.maxPaginatedRows))"
+                )
             }
             output.append(contentsOf: page)
 

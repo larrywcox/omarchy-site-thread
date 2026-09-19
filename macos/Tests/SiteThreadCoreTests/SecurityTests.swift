@@ -86,6 +86,85 @@ final class JSONLimitTests: XCTestCase {
     }
 }
 
+/// Regression: the response bounds guard against hostile payloads, so they
+/// must sit clear of what Site Manager legitimately returns. An earlier
+/// 20,000-value ceiling rejected any fleet past roughly 74 sites.
+final class FleetSizeTests: XCTestCase {
+
+    /// A `/v1/sites` page shaped like the real thing. The statistics block is
+    /// the bulk of the value count.
+    private func fleetPayload(siteCount: Int) -> [String: Any] {
+        let countKeys = [
+            "totalDevice", "offlineDevice", "gatewayDevice", "offlineGatewayDevice",
+            "wifiDevice", "wiredDevice", "pendingUpdateDevice", "wifiClient",
+            "wiredClient", "guestClient", "criticalNotification",
+        ]
+        let sites: [[String: Any]] = (0..<siteCount).map { index in
+            var counts: [String: Any] = [:]
+            for key in countKeys { counts[key] = index % 17 }
+            let issues: [[String: Any]] = (0..<24).map { period in
+                [
+                    "index": period,
+                    "startTimestamp": "2026-09-01T00:00:00Z",
+                    "duration": 12,
+                    "wanDowntime": false,
+                    "wan2FailoverActive": false,
+                    "latencyAvg": 14.2,
+                    "packetLoss": 0.0,
+                ]
+            }
+            return [
+                "siteId": String(format: "site%04d", index),
+                "hostId": String(format: "console-%04d", index),
+                "isOwner": index % 3 == 0,
+                "permission": "admin",
+                "meta": [
+                    "desc": "Branch \(index)",
+                    "name": "branch-\(index)",
+                    "timezone": "America/Chicago",
+                    "gatewayMac": "aa:bb:cc:dd:ee:ff",
+                ],
+                "statistics": [
+                    "counts": counts,
+                    "percentages": ["wanUptime": 99.9, "txRetry": 1.2],
+                    "ispInfo": ["name": "Acme Fiber", "organization": "Acme"],
+                    "internetIssues": issues,
+                ],
+            ]
+        }
+        return ["data": sites, "nextToken": ""]
+    }
+
+    func testALargeFleetPageIsAccepted() throws {
+        let payload = fleetPayload(siteCount: 200)
+        let body = try JSONSerialization.data(withJSONObject: payload, options: [])
+        XCTAssertLessThan(body.count, Limits.maxResponseBytes)
+
+        let decoded = try decodeJSON(body)
+        XCTAssertEqual(try rows(decoded).count, 200)
+    }
+
+    func testTheValueCeilingClearsAFullPageWithHeadroom() {
+        var pending: [Any] = [fleetPayload(siteCount: 200)]
+        var seen = 0
+        while !pending.isEmpty {
+            let value = pending.removeLast()
+            seen += 1
+            if let array = value as? [Any] {
+                pending.append(contentsOf: array)
+            } else if let object = value as? [String: Any] {
+                pending.append(contentsOf: object.values)
+            }
+        }
+        XCTAssertLessThan(seen * 4, Limits.maxJSONTotalValues)
+    }
+
+    func testAFleetLargerThanTheModelCeilingIsStillRejected() {
+        XCTAssertGreaterThan(Limits.maxModelItems, 200)
+        XCTAssertLessThan(Limits.maxModelItems, 1_000_000)
+    }
+}
+
 final class CredentialValidationTests: XCTestCase {
 
     func testAPIKeyPattern() {
