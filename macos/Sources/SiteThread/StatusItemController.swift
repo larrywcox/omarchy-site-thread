@@ -43,24 +43,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
 
         let severity = state.barSeverity
+        // Colours are fixed rather than left to the menu bar's own tinting, so
+        // an outage looks the same on a light and a dark bar. Set
+        // `monochromeBarIcon` to opt into the platform's template behaviour.
+        let monochrome = UserDefaults.standard.bool(forKey: "monochromeBarIcon")
+
         switch severity {
         case .critical, .warning:
-            // An alert glyph, tinted, the way the Omarchy panel swaps its bar
-            // icon when a site needs attention.
-            let alert = NSImage(
-                systemSymbolName: Palette.symbol(for: severity),
-                accessibilityDescription: "UniFi SiteThread"
+            // An alert glyph replaces the mark, the way the Omarchy panel
+            // swaps its bar icon when a site needs attention.
+            let color = severity == .critical
+                ? SiteThreadMark.BarColor.urgent
+                : SiteThreadMark.BarColor.backup
+            button.image = SiteThreadMark.alertImage(
+                symbol: Palette.symbol(for: severity),
+                color: monochrome ? NSColor.black : color
             )
-            alert?.isTemplate = true
-            button.image = alert
-            button.contentTintColor = severity == .critical
-                ? NSColor.systemRed
-                : NSColor.systemYellow
-        case .healthy, .disconnected:
-            // At rest the bar shows the app's own mark, tinted by the system.
+            if monochrome { button.image?.isTemplate = true }
+        case .healthy:
+            button.image = SiteThreadMark.statusImage(
+                color: monochrome ? nil : SiteThreadMark.BarColor.brand
+            )
+        case .disconnected:
+            // Nothing to report yet, so the mark stays neutral and dimmed.
             button.image = SiteThreadMark.statusImage()
-            button.contentTintColor = nil
         }
+        button.contentTintColor = nil
         button.appearsDisabled = severity == .disconnected
 
         let count = state.alertCount
