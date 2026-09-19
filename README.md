@@ -33,6 +33,19 @@ Version 0.4.7 provides:
 - Bounded API responses and JSON models to prevent remote memory exhaustion.
 - Plain-text rendering for all externally sourced labels.
 
+## macOS
+
+The Omarchy plugin is a Quickshell/QML bar widget and does not run on macOS. A
+native menu bar app built from the same model, health, and security logic lives
+in [`macos/`](macos/README.md):
+
+```bash
+cd macos && ./build.sh
+```
+
+That produces `macos/dist/UniFi SiteThread.app`. It needs macOS 12 or newer and
+the Xcode Command Line Tools, and has no third-party dependencies.
+
 ## Security model
 
 UniFi SiteThread does not ask for or store your UniFi password. Sign-in happens in
