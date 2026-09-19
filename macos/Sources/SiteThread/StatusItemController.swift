@@ -43,13 +43,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
 
         let severity = state.barSeverity
-        let symbol = Palette.symbol(for: severity)
-        let image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: "UniFi SiteThread"
-        )
-        image?.isTemplate = severity == .healthy || severity == .disconnected
-        button.image = image
+        switch severity {
+        case .critical, .warning:
+            // An alert glyph, tinted, the way the Omarchy panel swaps its bar
+            // icon when a site needs attention.
+            let alert = NSImage(
+                systemSymbolName: Palette.symbol(for: severity),
+                accessibilityDescription: "UniFi SiteThread"
+            )
+            alert?.isTemplate = true
+            button.image = alert
+            button.contentTintColor = severity == .critical
+                ? NSColor.systemRed
+                : NSColor.systemYellow
+        case .healthy, .disconnected:
+            // At rest the bar shows the app's own mark, tinted by the system.
+            button.image = SiteThreadMark.statusImage()
+            button.contentTintColor = nil
+        }
+        button.appearsDisabled = severity == .disconnected
 
         let count = state.alertCount
         if count > 0 {

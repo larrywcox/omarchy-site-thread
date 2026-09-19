@@ -45,9 +45,17 @@ struct PanelView: View {
                 .help("Back to all sites")
             }
 
-            Image(systemName: Palette.symbol(for: state.barSeverity))
-                .font(.system(size: 18))
-                .foregroundColor(Palette.color(for: state.barSeverity))
+            Group {
+                switch state.barSeverity {
+                case .critical, .warning:
+                    Image(systemName: Palette.symbol(for: state.barSeverity))
+                        .font(.system(size: 18))
+                case .healthy, .disconnected:
+                    Image(nsImage: SiteThreadMark.statusImage(size: 18))
+                        .renderingMode(.template)
+                }
+            }
+            .foregroundColor(Palette.color(for: state.barSeverity))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)

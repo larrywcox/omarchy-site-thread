@@ -8,6 +8,8 @@
 	<string>UniFi SiteThread</string>
 	<key>CFBundleExecutable</key>
 	<string>SiteThread</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.larrywcox.site-thread</string>
 	<key>CFBundlePackageType</key>

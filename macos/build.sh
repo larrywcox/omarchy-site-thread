@@ -38,6 +38,13 @@ cp "${BINARY}" "${BUNDLE}/Contents/MacOS/SiteThread"
 cp "${ROOT}/Resources/Info.plist" "${BUNDLE}/Contents/Info.plist"
 printf 'APPL????' > "${BUNDLE}/Contents/PkgInfo"
 
+# iconutil ships with macOS, so the committed PNG set needs no rasteriser.
+# Regenerate the PNGs with Resources/make-icon.py when the artwork changes.
+echo "==> Compiling the app icon"
+iconutil --convert icns \
+  --output "${BUNDLE}/Contents/Resources/AppIcon.icns" \
+  "${ROOT}/Resources/AppIcon.iconset"
+
 # An ad-hoc signature gives the bundle a stable identity, so the keychain
 # prompts once rather than on every launch.
 echo "==> Signing (ad-hoc)"
