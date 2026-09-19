@@ -27,6 +27,34 @@ open "dist/UniFi SiteThread.app"        # run it
 cp -R "dist/UniFi SiteThread.app" /Applications/   # install it
 ```
 
+## Disk image
+
+To produce a drag-to-install `.dmg` instead:
+
+```bash
+cd macos
+./package-dmg.sh
+```
+
+That writes `macos/dist/UniFi-SiteThread-<version>.dmg`. Open it and drag the
+app to Applications.
+
+A disk image is also built by CI on every push that touches `macos/`. Open the
+run under the repository's **Actions → macOS app** tab and download the
+`UniFi-SiteThread-dmg` artifact — useful when you want the app without
+installing a toolchain.
+
+The app is ad-hoc signed, not notarised with an Apple Developer ID. A disk image
+you built yourself opens normally. One downloaded from CI or copied from another
+Mac carries a quarantine flag, so clear it after installing:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/UniFi SiteThread.app"
+```
+
+Alternatively, right-click the app and choose **Open** the first time, then
+confirm in the dialog.
+
 To start it at login, add it under **System Settings → General → Login Items**.
 
 ### Try it without a console

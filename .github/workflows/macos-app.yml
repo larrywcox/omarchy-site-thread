@@ -1,0 +1,44 @@
+name: macOS app
+
+# Builds and tests the macOS menu bar app on a macOS runner and uploads an
+# installable disk image as a build artifact.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    paths:
+      - 'macos/**'
+      - '.github/workflows/macos-app.yml'
+  pull_request:
+    paths:
+      - 'macos/**'
+      - '.github/workflows/macos-app.yml'
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          sw_vers
+
+      - name: Test SiteThreadCore
+        run: swift test --package-path macos
+
+      - name: Build the app and disk image
+        run: macos/package-dmg.sh
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: UniFi-SiteThread-dmg
+          path: macos/dist/*.dmg
+          if-no-files-found: error
+          retention-days: 30
