@@ -73,12 +73,22 @@ enum SiteThreadMark {
         return image
     }
 
-    /// An alert glyph in a fixed colour.
+    /// An alert glyph in a fixed colour, optionally on a filled plate.
     ///
     /// The colour is baked into the bitmap rather than applied through
     /// `contentTintColor`, which the menu bar does not reliably honour for a
     /// status item.
-    static func alertImage(symbol: String, color: NSColor, size: CGFloat = 16) -> NSImage? {
+    ///
+    /// A white `plate` lifts the red outage glyph off a dark menu bar, where
+    /// red alone is low contrast. It is deliberately not used for the amber
+    /// warning: yellow on white is far harder to read than yellow on either
+    /// bar.
+    static func alertImage(
+        symbol: String,
+        color: NSColor,
+        size: CGFloat = 16,
+        plate: NSColor? = nil
+    ) -> NSImage? {
         guard let symbolImage = NSImage(
             systemSymbolName: symbol, accessibilityDescription: "UniFi SiteThread"
         ) else {
@@ -87,13 +97,33 @@ enum SiteThreadMark {
         symbolImage.isTemplate = true
 
         let target = NSSize(width: size, height: size)
-        let tinted = NSImage(size: target, flipped: false) { rect in
+
+        // Tint the glyph on its own first. Compositing the colour after the
+        // plate is drawn would flood the opaque plate behind it too.
+        let glyph = NSImage(size: target, flipped: false) { rect in
             symbolImage.draw(in: rect)
             color.set()
             rect.fill(using: .sourceAtop)
             return true
         }
-        tinted.isTemplate = false
-        return tinted
+
+        guard let plate = plate else {
+            glyph.isTemplate = false
+            return glyph
+        }
+
+        let composed = NSImage(size: target, flipped: false) { rect in
+            plate.setFill()
+            NSBezierPath(
+                roundedRect: rect,
+                xRadius: rect.width * 0.2237,
+                yRadius: rect.height * 0.2237
+            ).fill()
+            let inset = rect.width * 0.13
+            glyph.draw(in: rect.insetBy(dx: inset, dy: inset))
+            return true
+        }
+        composed.isTemplate = false
+        return composed
     }
 }

@@ -57,7 +57,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
                 : SiteThreadMark.BarColor.backup
             button.image = SiteThreadMark.alertImage(
                 symbol: Palette.symbol(for: severity),
-                color: monochrome ? NSColor.black : color
+                color: monochrome ? NSColor.black : color,
+                // Only the outage glyph gets a plate; amber on white would be
+                // less legible than amber on either bar.
+                plate: (monochrome || severity != .critical) ? nil : NSColor.white
             )
             if monochrome { button.image?.isTemplate = true }
         case .healthy:
