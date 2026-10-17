@@ -1,10 +1,14 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "views"
+import "components"
 import "Model.js" as Model
+import "GlobeModel.js" as GlobeModel
 
 Panel {
   id: root
@@ -13,15 +17,312 @@ Panel {
   manageIpc: false
 
   readonly property string helper: Qt.resolvedUrl("bin/site-thread").toString().replace(/^file:\/\//, "")
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: "#ff4d5a"
-  readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color accent: Color.accent
-  readonly property color healthy: "#42d66b"
-  readonly property color backup: "#f2c94c"
+  readonly property color foreground: (bar && bar.barForeground) ? bar.barForeground : ((bar && bar.foreground) ? bar.foreground : (Color.foreground || "#D8DEE9"))
+  readonly property color urgent: (bar && bar.urgent) ? bar.urgent : (Color.urgent || "#ff4d5a")
+  readonly property color accent: (bar && bar.accent) ? bar.accent : (Color.accent || "#89B4FA")
+  readonly property color healthy: "#10b981"
+  readonly property color backup: "#f59e0b"
+
+  readonly property bool isLightTheme: {
+    var bg = (bar && bar.background) ? bar.background : (Color.background || "#1E1E2E")
+    var bgLum = (bg.r * 0.299 + bg.g * 0.587 + bg.b * 0.114)
+    var fgLum = (foreground.r * 0.299 + foreground.g * 0.587 + foreground.b * 0.114)
+    return bgLum > 0.5 || fgLum < 0.5
+  }
+
+  function contrastTextFor(c) {
+    if (!c) return "#ffffff"
+    var lum = (c.r * 0.299 + c.g * 0.587 + c.b * 0.114)
+    return lum > 0.55 ? "#0f141c" : "#ffffff"
+  }
+  readonly property color accentForeground: contrastTextFor(accent)
+  readonly property color healthyForeground: contrastTextFor(healthy)
+  readonly property color backupForeground: contrastTextFor(backup)
+  readonly property color urgentForeground: contrastTextFor(urgent)
+
+  readonly property color dim: isLightTheme
+    ? Qt.rgba(foreground.r * 0.70 + ((bar && bar.background) ? bar.background.r : 1.0) * 0.30,
+              foreground.g * 0.70 + ((bar && bar.background) ? bar.background.g : 1.0) * 0.30,
+              foreground.b * 0.70 + ((bar && bar.background) ? bar.background.b : 1.0) * 0.30, 1.0)
+    : Qt.darker(foreground, 1.35)
+  readonly property color card: Qt.rgba(foreground.r, foreground.g, foreground.b, isLightTheme ? 0.04 : 0.055)
+  readonly property color cardHover: Qt.rgba(foreground.r, foreground.g, foreground.b, isLightTheme ? 0.08 : 0.085)
+  readonly property color outline: Qt.rgba(foreground.r, foreground.g, foreground.b, isLightTheme ? 0.14 : 0.18)
+  readonly property color track: Qt.rgba(foreground.r, foreground.g, foreground.b, isLightTheme ? 0.12 : 0.24)
+
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property int panelWidth: setting("panelWidth", 760)
-  readonly property int refreshSeconds: setting("refreshSeconds", 30)
+  readonly property int panelWidth: setting("panelWidth", 450)
+  property int refreshSeconds: setting("refreshSeconds", 30)
+  property int activeRefreshSeconds: setting("activeRefreshSeconds", 15)
+  property int idleRefreshSeconds: setting("idleRefreshSeconds", 120)
+  readonly property bool isUiActive: root.opened || root.analyticsOpen
+  readonly property int currentRefreshIntervalSec: isUiActive ? Math.max(10, Math.min(15, root.activeRefreshSeconds)) : Math.max(60, Math.min(300, root.idleRefreshSeconds))
+  readonly property int currentRefreshIntervalMs: currentRefreshIntervalSec * 1000
+
+  onIsUiActiveChanged: {
+    if (typeof refreshTimer !== "undefined" && refreshTimer) {
+      refreshTimer.interval = root.currentRefreshIntervalMs
+      refreshTimer.restart()
+    }
+    if (isUiActive) {
+      var ageSec = (Date.now() - root.lastRefreshMs) / 1000
+      if (ageSec >= root.activeRefreshSeconds) {
+        if (root.inSite) root.loadSite()
+        else root.refresh()
+      }
+    }
+  }
+
+  onActiveRefreshSecondsChanged: {
+    if (typeof refreshTimer !== "undefined" && refreshTimer) refreshTimer.interval = root.currentRefreshIntervalMs
+  }
+  onIdleRefreshSecondsChanged: {
+    if (typeof refreshTimer !== "undefined" && refreshTimer) refreshTimer.interval = root.currentRefreshIntervalMs
+  }
+
+  property bool autoRotate: false
+  property string issueFilter: "all"
+  property string deviceFilter: "all"
+  property string sitesSubView: "sites"
+  property int refreshAgeSec: 0
+  property double lastRefreshMs: Date.now()
+  property bool analyticsOpen: false
+  property bool settingsMode: false
+  property bool enableMultiDot: setting("enableMultiDot", true)
+  property string badgeMode: setting("badgeMode", "alerts")
+  property string preferredTerminal: setting("terminalCommand", "xdg-terminal-exec")
+  property bool enableNotifications: setting("enableNotifications", true)
+
+  property var diagnosticsData: null
+  property string lastErrorText: ""
+  property bool diagnosticsRunning: false
+
+  property int analyticsTab: 0
+
+  function openSettings() {
+    settingsMode = true
+    root.runDiagnostics()
+  }
+  function closeSettings() { settingsMode = false }
+  function openAnalytics(tabIndex) {
+    root.close()
+    // Extended from Math.min(4, tabIndex) to support tabs 0..6 (default to 0 Overview)
+    var targetTab = (tabIndex !== undefined && tabIndex !== null) ? Math.max(0, Math.min(6, tabIndex)) : 0
+    root.analyticsTab = targetTab
+    analyticsOpen = true
+    if (analyticsWindowLoader.item) {
+      analyticsWindowLoader.item.currentTab = targetTab
+    }
+  }
+  function closeAnalytics() {
+    analyticsOpen = false
+    root.analyticsTab = 0
+    if (analyticsWindowLoader.item) {
+      analyticsWindowLoader.item.currentTab = 0
+    }
+  }
+  function toggleAnalytics() {
+    if (!analyticsOpen) {
+      root.close()
+      root.analyticsTab = 0
+      analyticsOpen = true
+      if (analyticsWindowLoader.item) {
+        analyticsWindowLoader.item.currentTab = 0
+      }
+    } else {
+      root.closeAnalytics()
+    }
+  }
+
+  function goToMainPage() {
+    if (root.analyticsOpen) root.closeAnalytics()
+    if (root.inSite) root.backToSites()
+    root.settingsMode = false
+    root.activeTab = 0
+    root.sitesSubView = "sites"
+  }
+
+  function handleBarClick(b) {
+    if (b === Qt.RightButton) {
+      if (!root.opened) root.open()
+      root.settingsMode = true
+    } else if (b === Qt.MiddleButton) {
+      if (root.inSite) root.loadSite()
+      else root.refresh()
+    } else {
+      if (root.opened) {
+        if (root.inSite || root.settingsMode || root.activeTab !== 0) {
+          root.goToMainPage()
+        } else {
+          root.close()
+        }
+      } else {
+        root.goToMainPage()
+        root.open()
+      }
+    }
+  }
+
+  function getBadgeText() {
+    if (root.badgeMode === "off") return ""
+    if (root.badgeMode === "clients") {
+      return String(root.data && root.data.network && root.data.network.clientCount ? root.data.network.clientCount : "")
+    } else if (root.badgeMode === "sites") {
+      return (root.data && root.data.sites) ? (root.data.sites.length + "/" + root.data.sites.length) : ""
+    } else if (root.badgeMode === "updates") {
+      return String(root.data && root.data.network && root.data.network.updateCount ? root.data.network.updateCount : "")
+    }
+    return root.alertCount > 0 ? String(root.alertCount) : ""
+  }
+
+  function sendDesktopNotification(title, message, urgency) {
+    if (!root.enableNotifications) return
+    var u = urgency || "normal"
+    var t = title || "UniFi SiteThread"
+    var m = message || ""
+    Quickshell.execDetached(["notify-send", "--app-name=UniFi SiteThread", "-i", "network-wired", "-u", u, t, m])
+  }
+
+  function testNotification() {
+    sendDesktopNotification("UniFi SiteThread Alert", "Desktop notifications are working! WAN Failover & Site Outage alerts enabled.", "normal")
+  }
+
+  function getTerminalArgs(cmdArgs, workspacePath) {
+    var termSetting = root.preferredTerminal || ""
+    var ws = workspacePath || ""
+    if (ws.indexOf("file://") === 0) ws = decodeURIComponent(ws.substring(7))
+
+    if (!termSetting || termSetting === "xdg-terminal-exec") {
+      var args = ["xdg-terminal-exec"]
+      if (ws) args.push("--dir=" + ws)
+      args.push("--")
+      return args.concat(cmdArgs)
+    }
+
+    var parts = termSetting.split(/\s+/).filter(function(p) { return p.length > 0 })
+    var bin = parts[0].split("/").pop()
+    if (bin === "xdg-terminal-exec") {
+      if (ws) parts.push("--dir=" + ws)
+      parts.push("--")
+      return parts.concat(cmdArgs)
+    } else if (bin === "foot") {
+      if (ws) parts.push("-D", ws)
+      return parts.concat(cmdArgs)
+    } else if (bin === "kitty") {
+      if (ws) parts.push("-d", ws)
+      return parts.concat(cmdArgs)
+    } else if (bin === "ghostty") {
+      if (ws) parts.push("--working-directory=" + ws)
+      if (parts.indexOf("-e") === -1) parts.push("-e")
+      return parts.concat(cmdArgs)
+    } else if (bin === "alacritty") {
+      if (ws) parts.push("--working-directory", ws)
+      if (parts.indexOf("-e") === -1) parts.push("-e")
+      return parts.concat(cmdArgs)
+    } else {
+      if (parts.indexOf("-e") !== -1 || parts.indexOf("--") !== -1) {
+        return parts.concat(cmdArgs)
+      }
+      return parts.concat(["-e"]).concat(cmdArgs)
+    }
+  }
+
+  function launchSsh(host, user) {
+    var u = user || "root"
+    var h = host || ""
+    if (!h) return
+    var target = u ? (u + "@" + h) : h
+    var termArgs = getTerminalArgs(["ssh", target])
+    Quickshell.execDetached(termArgs)
+  }
+
+  function launchPing(host) {
+    if (!host) return
+    var termArgs = getTerminalArgs(["ping", host])
+    Quickshell.execDetached(termArgs)
+  }
+
+  function updateSetting(name, value) {
+    if (name === "enableMultiDot") root.enableMultiDot = value
+    else if (name === "badgeMode") root.badgeMode = value
+    else if (name === "terminalCommand") root.preferredTerminal = value
+    else if (name === "autoRotate") root.autoRotate = value
+    else if (name === "enableNotifications") root.enableNotifications = value
+    else if (name === "activeRefreshSeconds") root.activeRefreshSeconds = value
+    else if (name === "idleRefreshSeconds") root.idleRefreshSeconds = value
+    else if (name === "refreshSeconds") root.refreshSeconds = value
+
+    var next = Object.assign({}, root.settings || {})
+    next[name] = value
+    if (typeof root.writeSettings === "function") {
+      root.writeSettings(next)
+    } else if (root.settings !== undefined) {
+      root.settings = next
+    }
+  }
+
+  function clearResolvedIssues() {
+    clearHistoryProc.command = [root.helper, "clear-history"]
+    clearHistoryProc.running = true
+  }
+
+  function getAllFleetDevices() {
+    var out = []
+    if (root.data && root.data.network && Array.isArray(root.data.network.devices)) {
+      out = out.concat(root.data.network.devices)
+    }
+    if (root.data && Array.isArray(root.data.devices)) {
+      for (var i = 0; i < root.data.devices.length; i++) {
+        var d = root.data.devices[i]
+        var exists = false
+        for (var j = 0; j < out.length; j++) {
+          if ((d.mac && out[j].mac === d.mac) || (d.name && out[j].name === d.name && d.ip === out[j].ip)) {
+            exists = true
+            break
+          }
+        }
+        if (!exists) out.push(d)
+      }
+    }
+    if (root.data && Array.isArray(root.data.sites)) {
+      for (var k = 0; k < root.data.sites.length; k++) {
+        var s = root.data.sites[k]
+        if (s.gatewayModel && s.gatewayIp) {
+          var gwFound = false
+          for (var m = 0; m < out.length; m++) {
+            if (out[m].ip === s.gatewayIp) { gwFound = true; break }
+          }
+          if (!gwFound) {
+            out.unshift({
+              name: s.name + " Gateway (" + s.gatewayModel + ")",
+              model: s.gatewayModel,
+              ip: s.gatewayIp,
+              site: s.name,
+              online: s.status !== "down",
+              category: "gateways"
+            })
+          }
+        }
+      }
+    }
+    return out
+  }
+
+  function getSiteConsole(hostId) {
+    if (root.siteData && root.siteData.console && root.siteData.console.hostId) {
+      return root.siteData.console
+    }
+    if (root.data && Array.isArray(root.data.consoles)) {
+      var hid = String(hostId || (root.selectedSite ? root.selectedSite.hostId : "") || "")
+      var sName = root.selectedSite ? String(root.selectedSite.name || "") : ""
+      for (var i = 0; i < root.data.consoles.length; i++) {
+        var c = root.data.consoles[i]
+        if (hid && String(c.hostId || "") === hid) return c
+        if (sName && String(c.siteName || "") === sName) return c
+      }
+    }
+    return null
+  }
 
   property var data: ({ connected: false })
   property bool loading: false
@@ -33,12 +334,15 @@ Panel {
   property string selectedCameraId: ""
   property string selectedCameraName: ""
   property string snapshotPath: ""
+  property string priorSnapshotPath: ""
+  property string cameraPermissionError: ""
   property bool confirmDisconnect: false
   property bool localSetup: false
   property bool pasteForLocalConsole: false
   property var selectedSite: null
   property var siteData: ({})
   property bool siteLoading: false
+  property bool siteLiveRefreshing: false
   property int siteTab: 0
   property string overviewSelection: ""
   property var downConfirmations: ({})
@@ -53,10 +357,18 @@ Panel {
   readonly property string barSeverity: cloudMode
     ? (siteDownCount > 0 ? "critical" : (siteBackupCount > 0 ? "warning" : "healthy"))
     : severity
+  readonly property var issuesList: data && data.issues ? data.issues : []
+  readonly property int activeIssuesCount: {
+    var count = 0
+    for (var i = 0; i < issuesList.length; i++) {
+      if (issuesList[i].active === true) count++
+    }
+    return count
+  }
   readonly property int alertCount: connected
     ? (cloudMode
-      ? siteDownCount
-      : Number((data.network && data.network.offlineCount || 0) + (data.protect && data.protect.offlineCount || 0)))
+      ? Math.max(siteDownCount + siteBackupCount, activeIssuesCount)
+      : Number((data.network && data.network.offlineCount || 0) + (data.protect && data.protect.offlineCount || 0) + activeIssuesCount))
     : 0
 
   function countSitesWithStatus(status) {
@@ -125,6 +437,9 @@ Panel {
     } else if (updates > 0) {
       parsed.severity = "warning"
       parsed.message = String(updates) + " firmware update(s) across " + String(parsed.sites.length) + " sites"
+    } else if (parsed.partial && parsed.failedEndpoints && parsed.failedEndpoints.length > 0) {
+      parsed.severity = "warning"
+      parsed.message = "Partial fleet telemetry (" + parsed.failedEndpoints.join(", ") + " failed)"
     } else {
       parsed.severity = "healthy"
       parsed.message = "All " + String(parsed.sites.length) + " sites operational"
@@ -142,31 +457,49 @@ Panel {
 
   function openSite(site) {
     if (!site || !site.hostId || !site.id) return
+    if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+    if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
     selectedSite = site
     siteData = ({})
     siteTab = 0
     selectedCameraId = ""
     selectedCameraName = ""
     snapshotPath = ""
+    priorSnapshotPath = ""
+    siteLoading = true
+    siteLiveRefreshing = true
     loadSite()
   }
 
   function loadSite() {
-    if (!inSite || siteProc.running) return
-    siteLoading = true
+    if (!inSite) return
     notice = ""
-    siteProc.command = [helper, "site", String(selectedSite.hostId), String(selectedSite.id)]
-    siteProc.running = true
+
+    // 1. Immediately request cached data if available (instant response)
+    siteCachedProc.command = [helper, "site", String(selectedSite.hostId), String(selectedSite.id), "--cached-only"]
+    siteCachedProc.running = true
+
+    // 2. Launch background live refresh
+    if (!siteProc.running) {
+      siteLoading = (!siteData || !siteData.ok)
+      siteLiveRefreshing = true
+      siteProc.command = [helper, "site", String(selectedSite.hostId), String(selectedSite.id), "--live"]
+      siteProc.running = true
+    }
   }
 
   function backToSites() {
+    if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+    if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
     selectedSite = null
     siteData = ({})
     siteTab = 0
     selectedCameraId = ""
     selectedCameraName = ""
     snapshotPath = ""
+    priorSnapshotPath = ""
     activeTab = 1
+    sitesSubView = "sites"
     notice = ""
   }
 
@@ -250,16 +583,41 @@ Panel {
     pasteProc.running = true
   }
 
+  function deleteSnapshotFile(filePath) {
+    if (!filePath) return
+    var cleanPath = String(filePath).replace(/^file:\/\//, "").split("?")[0].split("#")[0]
+    if (cleanPath.indexOf("camera-") !== -1) {
+      Quickshell.execDetached(["rm", "-f", cleanPath])
+    }
+  }
+
+  function cleanupPriorSnapshot() {
+    if (root.priorSnapshotPath && root.priorSnapshotPath !== "") {
+      var pClean = String(root.priorSnapshotPath).replace(/^file:\/\//, "").split("?")[0].split("#")[0]
+      var curClean = String(root.snapshotPath).replace(/^file:\/\//, "").split("?")[0].split("#")[0]
+      if (pClean !== curClean) {
+        root.deleteSnapshotFile(pClean)
+      }
+      root.priorSnapshotPath = ""
+    }
+  }
+
   function selectCamera(camera) {
     if (!camera) return
-    selectedCameraId = String(camera.id || "")
+    var newCamId = String(camera.id || "")
+    if (selectedCameraId !== newCamId) {
+      if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+      if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
+      snapshotPath = ""
+      priorSnapshotPath = ""
+    }
+    selectedCameraId = newCamId
     selectedCameraName = Model.safe(camera.name, "Camera")
-    snapshotPath = ""
     if (selectedCameraId !== "") requestSnapshot()
   }
 
   function requestSnapshot() {
-    var viewingProtect = inSite ? siteTab === 1 : activeTab === 2
+    var viewingProtect = inSite ? siteTab === 1 : activeTab === 3
     if (!opened || !viewingProtect || selectedCameraId === "" || snapshotProc.running) return
     snapshotProc.command = inSite
       ? [helper, "snapshot", selectedCameraId, String(selectedSite.hostId)]
@@ -281,24 +639,43 @@ Panel {
       if (inSite) loadSite()
       else refresh()
     }
-    else snapshotPath = ""
+    else {
+      if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+      if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
+      snapshotPath = ""
+      priorSnapshotPath = ""
+    }
   }
 
   onActiveTabChanged: {
-    if (!inSite && activeTab === 2 && data.protect && data.protect.cameras && data.protect.cameras.length > 0) {
+    if (!inSite && activeTab !== 3) {
+      if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+      if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
+      snapshotPath = ""
+      priorSnapshotPath = ""
+    }
+    if (!inSite && activeTab === 3 && data.protect && data.protect.cameras && data.protect.cameras.length > 0) {
       if (selectedCameraId === "") selectCamera(data.protect.cameras[0])
       else requestSnapshot()
     }
   }
 
   onSiteTabChanged: {
+    if (inSite && siteTab !== 1) {
+      if (root.snapshotPath) root.deleteSnapshotFile(root.snapshotPath)
+      if (root.priorSnapshotPath) root.deleteSnapshotFile(root.priorSnapshotPath)
+      snapshotPath = ""
+      priorSnapshotPath = ""
+    }
     if (inSite && siteTab === 1 && siteProtectInstalled && siteData.protect.cameras.length > 0) {
       if (selectedCameraId === "") selectCamera(siteData.protect.cameras[0])
       else requestSnapshot()
     }
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    refresh()
+  }
 
   Process {
     id: summaryProc
@@ -307,11 +684,72 @@ Panel {
       onStreamFinished: {
         var parsed = Model.parse(text, { ok: false, connected: false, error: "Invalid helper response" })
         root.data = root.stabilizeCloudSummary(parsed)
-        root.notice = parsed.ok ? "" : Model.safe(parsed.error, "Unable to load UniFi")
+        if (parsed.ok) {
+          root.notice = ""
+          root.lastErrorText = ""
+        } else {
+          var errDetail = parsed.error || (summaryStderr.text ? summaryStderr.text.trim() : "Unable to load UniFi")
+          root.lastErrorText = errDetail
+          root.notice = Model.safe(errDetail, "Unable to load UniFi")
+        }
         root.loading = false
+        root.refreshAgeSec = 0
+        root.lastRefreshMs = Date.now()
       }
     }
+    stderr: StdioCollector {
+      id: summaryStderr
+      waitForEnd: true
+    }
     onExited: function(exitCode) { root.loading = false }
+  }
+
+  Process {
+    id: prefetchProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // Site prefetch finished
+      }
+    }
+  }
+
+  function prefetchSites() {
+    if (prefetchProc.running) return
+    prefetchProc.command = [root.helper, "prefetch-sites"]
+    prefetchProc.running = true
+  }
+
+  Timer {
+    id: prefetchTimer
+    interval: 600000 // 10 minutes = 600,000 ms
+    repeat: true
+    running: true
+    onTriggered: root.prefetchSites()
+  }
+
+  Process {
+    id: clearHistoryProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.refresh()
+    }
+  }
+
+  Process {
+    id: siteCachedProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = Model.parse(text, { ok: false })
+        if (parsed.ok && root.inSite && root.selectedSite && String(parsed.siteId) === String(root.selectedSite.id)) {
+          if (!root.siteData || !root.siteData.ok || root.siteData._cached) {
+            root.siteData = parsed
+            root.siteLoading = false
+          }
+        }
+      }
+    }
   }
 
   Process {
@@ -321,21 +759,68 @@ Panel {
       onStreamFinished: {
         var parsed = Model.parse(text, { ok: false, error: "Invalid site response" })
         if (parsed.ok) {
-          root.siteData = parsed
-          root.notice = ""
-          if (root.siteTab === 1 && parsed.protect && parsed.protect.cameras && parsed.protect.cameras.length > 0) {
-            var selectedStillExists = false
-            for (var index = 0; index < parsed.protect.cameras.length; index++) {
-              if (String(parsed.protect.cameras[index].id) === root.selectedCameraId) selectedStillExists = true
+          if (root.inSite && root.selectedSite && String(parsed.siteId) === String(root.selectedSite.id)) {
+            root.siteData = parsed
+            root.notice = ""
+            root.lastErrorText = ""
+            if (root.siteTab === 1 && parsed.protect && parsed.protect.cameras && parsed.protect.cameras.length > 0) {
+              var selectedStillExists = false
+              for (var index = 0; index < parsed.protect.cameras.length; index++) {
+                if (String(parsed.protect.cameras[index].id) === root.selectedCameraId) selectedStillExists = true
+              }
+              if (!selectedStillExists) root.selectCamera(parsed.protect.cameras[0])
+              else root.requestSnapshot()
             }
-            if (!selectedStillExists) root.selectCamera(parsed.protect.cameras[0])
-            else root.requestSnapshot()
           }
-        } else root.notice = Model.safe(parsed.error, "Unable to load this site")
+        } else {
+          var errDetail = parsed.error || (siteStderr.text ? siteStderr.text.trim() : "Unable to load this site")
+          root.lastErrorText = errDetail
+          if (!root.siteData || !root.siteData.ok) {
+            root.notice = Model.safe(errDetail, "Unable to load this site")
+          }
+        }
         root.siteLoading = false
+        root.siteLiveRefreshing = false
       }
     }
-    onExited: function(exitCode) { root.siteLoading = false }
+    stderr: StdioCollector {
+      id: siteStderr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.siteLoading = false
+      root.siteLiveRefreshing = false
+    }
+  }
+
+  Process {
+    id: diagProc
+    command: [root.helper, "diagnose"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = Model.parse(text, null)
+        if (parsed && parsed.ok) {
+          root.diagnosticsData = parsed
+          if (parsed.apiError) {
+            root.lastErrorText = parsed.apiError
+          }
+        }
+        root.diagnosticsRunning = false
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.diagnosticsRunning = false
+    }
+  }
+
+  function runDiagnostics() {
+    if (diagProc.running) return
+    root.diagnosticsRunning = true
+    diagProc.running = true
   }
 
   Process {
@@ -423,7 +908,15 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         var parsed = Model.parse(text, { ok: false })
-        if (parsed.ok && parsed.path) root.snapshotPath = "file://" + parsed.path
+        if (parsed.ok && parsed.path) {
+          root.cameraPermissionError = ""
+          if (root.snapshotPath !== "") {
+            root.priorSnapshotPath = root.snapshotPath
+          }
+          root.snapshotPath = "file://" + parsed.path + "?t=" + Date.now()
+        } else if (parsed && (parsed.permissionError || (parsed.error && parsed.error.indexOf("protect:stream") >= 0))) {
+          root.cameraPermissionError = parsed.error || "Missing 'protect:stream' permission for camera snapshots"
+        }
       }
     }
   }
@@ -442,7 +935,8 @@ Panel {
   }
 
   Timer {
-    interval: Math.max(10, root.refreshSeconds) * 1000
+    id: refreshTimer
+    interval: root.currentRefreshIntervalMs
     running: true
     repeat: true
     triggeredOnStart: false
@@ -451,13 +945,21 @@ Panel {
 
   Timer {
     interval: 2500
-    running: root.opened && root.selectedCameraId !== "" && (root.inSite ? root.siteTab === 1 : root.activeTab === 2)
+    running: root.opened && root.selectedCameraId !== "" && (root.inSite ? root.siteTab === 1 : root.activeTab === 3)
     repeat: true
     triggeredOnStart: false
     onTriggered: root.requestSnapshot()
   }
 
-  implicitWidth: button.implicitWidth + (badge.visible ? badge.width : 0)
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    onTriggered: root.refreshAgeSec = Math.max(0, Math.floor((Date.now() - root.lastRefreshMs) / 1000))
+  }
+
+
+  implicitWidth: button.implicitWidth + (multiDotRow.visible ? multiDotRow.width + Style.space(6) : 0) + (badge.visible ? badge.width + Style.space(4) : 0)
   implicitHeight: button.implicitHeight
 
   BarIconButton {
@@ -467,35 +969,83 @@ Panel {
     y: 0
     height: parent ? parent.height : implicitHeight
     bar: root.bar
+    iconComponent: Component {
+      Item {
+        UnifiIcon {
+          anchors.centerIn: parent
+          size: Style.space(12)
+          color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+        }
+      }
+    }
     text: Model.severityIcon(root.barSeverity)
-    foreground: "#ffffff"
-    activeColor: "#ffffff"
-    useActiveColor: false
+    foreground: root.foreground
+    activeColor: root.barSeverity === "critical" ? root.urgent : (root.barSeverity === "warning" ? root.backup : root.foreground)
+    useActiveColor: root.connected && root.barSeverity !== "healthy"
     active: root.connected && root.barSeverity !== "healthy"
-    dimmed: false
+    dimmed: !root.connected
     tooltipText: !root.connected
       ? "UniFi SiteThread · Connect"
-      : "UniFi SiteThread · " + Model.safe(root.data.message, "Connected")
+      : ("UniFi SiteThread · " + Model.safe(root.data.message, "Connected") + "\nLeft-click: Dashboard • Right-click: Settings • Middle-click: Refresh")
     onPressed: function(b) {
-      if (b === Qt.MiddleButton) root.refresh()
-      else root.toggle()
+      root.handleBarClick(b)
+    }
+  }
+
+  // Multi-Dot Site Status Row on Bar
+  Row {
+    id: multiDotRow
+    parent: root
+    visible: Boolean(root.enableMultiDot && root.data && root.data.sites && root.data.sites.length > 0)
+    x: button.x + button.width - Style.space(2)
+    y: Math.max(0, (root.height - height) / 2)
+    height: Style.space(14)
+    spacing: Style.space(3)
+    anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+
+    Repeater {
+      model: root.data && root.data.sites ? root.data.sites : []
+      delegate: Item {
+        required property var modelData
+        width: Style.space(6)
+        height: Style.space(6)
+        anchors.verticalCenter: parent.verticalCenter
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: Style.space(5)
+          height: Style.space(5)
+          radius: width / 2
+          color: modelData.status === "down" ? root.urgent : (modelData.status === "backup" ? root.backup : root.healthy)
+          opacity: (modelData.status === "down" || modelData.status === "backup") ? 0.9 : 0.85
+
+          SequentialAnimation on opacity {
+            running: modelData.status === "down" || modelData.status === "backup"
+            loops: Animation.Infinite
+            NumberAnimation { from: 0.35; to: 1.0; duration: 600; easing.type: Easing.InOutQuad }
+            NumberAnimation { from: 1.0; to: 0.35; duration: 600; easing.type: Easing.InOutQuad }
+          }
+        }
+      }
     }
   }
 
   Rectangle {
     id: badge
     parent: root
-    visible: root.alertCount > 0
-    x: button.x + button.width - Style.space(4)
+    visible: root.getBadgeText() !== ""
+    x: multiDotRow.visible ? multiDotRow.x + multiDotRow.width + Style.space(3) : button.x + button.width - Style.space(4)
     y: Math.max(0, (root.height - height) / 2)
     width: Math.max(height, badgeText.implicitWidth + Style.space(6))
     height: Style.space(15)
     radius: height / 2
-    color: root.urgent
+    color: root.barSeverity === "critical" ? root.urgent : (root.barSeverity === "warning" ? root.backup : root.accent)
+    border.width: 1
+    border.color: (Color.popups && Color.popups.background) ? Color.popups.background : "#1E1E2E"
     Text { textFormat: Text.PlainText;
       id: badgeText
       anchors.centerIn: parent
-      text: String(root.alertCount)
+      text: root.getBadgeText()
       color: "#ffffff"
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -503,86 +1053,570 @@ Panel {
     }
   }
 
-  PopupCard {
+  MouseArea {
+    id: barExtraMouse
+    parent: root
+    visible: multiDotRow.visible || badge.visible
+    x: multiDotRow.visible ? multiDotRow.x : badge.x
+    y: 0
+    width: Math.max(0, (root.width > 0 ? root.width : root.implicitWidth) - x)
+    height: root.height > 0 ? root.height : (button.height > 0 ? button.height : button.implicitHeight)
+    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+    hoverEnabled: true
+    cursorShape: Qt.PointingHandCursor
+    onEntered: {
+      if (root.bar && button.tooltipText) root.bar.showTooltip(button, button.tooltipText)
+    }
+    onExited: {
+      if (root.bar) root.bar.hideTooltip(button)
+    }
+    onClicked: function(mouse) {
+      if (root.bar) root.bar.hideTooltip(button)
+      root.handleBarClick(mouse.button)
+    }
+  }
+
+  KeyboardPanel {
     id: popup
     anchorItem: button
     bar: root.bar
     owner: root
     open: root.opened
-    triggerMode: "click"
+    focusTarget: keyCatcher
     contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
-    contentHeight: popup.fittedContentHeight(Math.min(Style.space(650), content.implicitHeight))
+    contentHeight: popup.fittedContentHeight(Math.min(Style.space(720), content.implicitHeight))
 
-    Flickable {
-      id: scroll
+    PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
-      contentWidth: width
-      contentHeight: content.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      interactive: contentHeight > height
 
-      Column {
-        id: content
-        width: scroll.width
-        spacing: Style.space(12)
-
-        Row {
-          width: parent.width
-          spacing: Style.space(12)
-          PanelActionButton {
-            visible: root.inSite
-            iconText: "\uf060"
-            tooltipText: "Back to all sites"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            size: Style.space(28)
-            onClicked: root.backToSites()
-          }
-          Text { textFormat: Text.PlainText;
-            text: "\uf233"
-            color: "#ffffff"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.display
-            anchors.verticalCenter: parent.verticalCenter
-          }
-          Column {
-            width: parent.width - Style.space(root.inSite ? 140 : 100)
-            spacing: Style.space(2)
-            Text { textFormat: Text.PlainText;
-              text: root.inSite ? Model.safe(root.selectedSite.name, "UNIFI SITE") : "UNIFI SITETHREAD"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-            }
-            Text { textFormat: Text.PlainText;
-              text: root.inSite
-                ? Model.safe(root.selectedSite.statusText, "Live site view")
-                : (root.connected ? Model.summarySubtitle(root.data) : "Network + Protect")
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-          }
-          PanelActionButton {
-            iconText: "\uf021"
-            tooltipText: "Refresh"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            size: Style.space(28)
-            onClicked: root.inSite ? root.loadSite() : root.refresh()
-          }
-          PanelActionButton {
-            visible: root.connected && !root.inSite
-            iconText: "\uf35d"
-            tooltipText: "Open UniFi"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            size: Style.space(28)
-            onClicked: root.openConsole()
-          }
+      onMoveRequested: function(dx, dy) {
+        if (dy !== 0) scroll.contentY = Math.max(0, Math.min(scroll.contentHeight - scroll.height, scroll.contentY + dy * 56))
+      }
+      onCloseRequested: root.close()
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") {
+          if (root.inSite) root.loadSite()
+          else root.refresh()
+        } else if (t === "s" || t === "S") {
+          root.settingsMode ? root.closeSettings() : root.openSettings()
+        } else if (t === "a" || t === "A" || t === "m" || t === "M") {
+          root.toggleAnalytics()
+        } else if (t === "w" || t === "W") {
+          root.openConsole()
+        } else if (t === "q" || t === "Q") {
+          root.close()
+        } else if (t === "1") {
+          root.activeTab = 0
+        } else if (t === "2") {
+          root.activeTab = 1
+        } else if (t === "3") {
+          root.activeTab = 2
+        } else if (t === "4" && (!root.cloudMode || (root.data && root.data.protect && root.data.protect.available))) {
+          root.activeTab = 3
         }
+      }
+
+      Flickable {
+        id: scroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: contentHeight > height
+
+        Column {
+          id: content
+          width: scroll.width
+          spacing: Style.space(12)
+
+          // Agent Hub Style Header Card
+          BorderSurface {
+            id: mainHeader
+            width: parent.width
+            color: root.card
+            borderSpec: Border.flat(root.isLightTheme ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08), 1)
+            padding: Style.space(8)
+            radius: Style.cornerRadius
+            implicitHeight: headerRow.implicitHeight + contentTopInset + contentBottomInset
+
+            RowLayout {
+              id: headerRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.topMargin: mainHeader.contentTopInset
+              anchors.rightMargin: mainHeader.contentRightInset
+              anchors.bottomMargin: mainHeader.contentBottomInset
+              anchors.leftMargin: mainHeader.contentLeftInset
+              spacing: Style.space(8)
+
+              // Back button if inside site
+              Rectangle {
+                visible: root.inSite
+                radius: 4
+                color: backMouse.containsMouse ? root.cardHover : root.track
+                Layout.preferredWidth: Style.space(26)
+                Layout.preferredHeight: Style.space(26)
+                Text {
+                  textFormat: Text.PlainText;
+                  anchors.centerIn: parent
+                  text: ""
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                MouseArea {
+                  id: backMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.backToSites()
+                }
+
+                PanelToolTip {
+                  visible: backMouse.containsMouse
+                  text: "Back to all sites"
+                  fontFamily: root.fontFamily
+                }
+              }
+
+              // UniFi Logo
+              UnifiIcon {
+                size: Style.space(20)
+                color: root.accent
+                Layout.alignment: Qt.AlignVCenter
+              }
+
+              // Title & Subtitle + Live refresh age / refreshing state
+              ColumnLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                spacing: 1
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(6)
+                  Text {
+                    textFormat: Text.PlainText;
+                    text: root.settingsMode
+                      ? "UNIFI SITETHREAD SETTINGS"
+                      : (root.inSite
+                          ? Model.safe(root.selectedSite.name, "UNIFI SITE")
+                          : "UNIFI SITETHREAD")
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: 13
+                    font.bold: true
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                  }
+
+                  // Status badge
+                  Rectangle {
+                    visible: root.connected && !root.inSite && !root.settingsMode
+                    radius: 3
+                    height: Style.space(16)
+                    implicitWidth: statusPillText.implicitWidth + Style.space(8)
+                    color: root.barSeverity === "critical"
+                      ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.18)
+                      : (root.barSeverity === "warning"
+                          ? Qt.rgba(root.backup.r, root.backup.g, root.backup.b, 0.18)
+                          : Qt.rgba(root.healthy.r, root.healthy.g, root.healthy.b, 0.18))
+                    border.width: 1
+                    border.color: root.barSeverity === "critical" ? root.urgent : (root.barSeverity === "warning" ? root.backup : root.healthy)
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      id: statusPillText
+                      anchors.centerIn: parent
+                      text: root.barSeverity === "critical" ? "ATTENTION" : (root.barSeverity === "warning" ? "BACKUP WAN" : "OPERATIONAL")
+                      color: root.barSeverity === "critical" ? root.urgent : (root.barSeverity === "warning" ? root.backup : root.healthy)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 1
+                      font.bold: true
+                    }
+                  }
+                }
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(6)
+
+                  Text {
+                    textFormat: Text.PlainText;
+                    text: root.settingsMode
+                      ? "Configuration, Badge Modes & Terminal Launcher"
+                      : (root.inSite
+                          ? (root.siteLiveRefreshing
+                              ? (root.siteData && root.siteData._cached ? "Cached view" : "Connecting to site…")
+                              : (root.siteData && root.siteData._cached ? "Cached view · 10m cycle" : Model.safe(root.selectedSite.statusText, "Live site view")))
+                          : (root.connected ? Model.summarySubtitle(root.data) : "Network + Protect"))
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                  }
+
+                  // Age indicator
+                  RowLayout {
+                    spacing: Style.space(3)
+                    visible: !root.loading && !(root.inSite && root.siteLiveRefreshing) && root.connected && root.refreshAgeSec >= 0
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: ""
+                      color: root.refreshAgeSec > (root.idleRefreshSeconds + 60) ? root.urgent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 2
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: {
+                        var a = root.refreshAgeSec
+                        if (a < 0) return ""
+                        if (a < 10) return "Refreshed just now"
+                        if (a < 60) return "Refreshed " + a + "s ago"
+                        if (a < 3600) return "Refreshed " + Math.floor(a / 60) + "m ago"
+                        return "Refreshed " + Math.floor(a / 3600) + "h " + Math.floor((a % 3600) / 60) + "m ago"
+                      }
+                      color: root.refreshAgeSec > (root.idleRefreshSeconds + 60) ? root.urgent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 1
+                    }
+                  }
+
+                  // Refreshing spinner text
+                  RowLayout {
+                    spacing: Style.space(3)
+                    visible: root.loading && !(root.inSite && root.siteLiveRefreshing)
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: ""
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 2
+                      transformOrigin: Item.Center
+
+                      RotationAnimation on rotation {
+                        running: root.loading
+                        loops: Animation.Infinite
+                        from: 0
+                        to: 360
+                        duration: 800
+                      }
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: "Refreshing…"
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 1
+                      opacity: 0.9
+                    }
+                  }
+
+                  // Site live syncing spinner
+                  RowLayout {
+                    spacing: Style.space(3)
+                    visible: root.inSite && root.siteLiveRefreshing
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: ""
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 2
+                      transformOrigin: Item.Center
+
+                      RotationAnimation on rotation {
+                        running: root.inSite && root.siteLiveRefreshing
+                        loops: Animation.Infinite
+                        from: 0
+                        to: 360
+                        duration: 800
+                      }
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: "Syncing live…"
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption - 1
+                      opacity: 0.9
+                    }
+                  }
+                }
+              }
+
+              // Header Action Buttons cluster
+              RowLayout {
+                spacing: Style.space(4)
+                Layout.alignment: Qt.AlignVCenter
+
+                // 1. Analytics Floating Window Button
+                Rectangle {
+                  visible: root.connected && !root.settingsMode
+                  radius: 3
+                  color: chartMouse.containsMouse ? root.cardHover : root.track
+                  Layout.preferredHeight: Style.space(24)
+                  Layout.preferredWidth: Style.space(24)
+
+                  Text {
+                    textFormat: Text.PlainText;
+                    anchors.centerIn: parent
+                    text: ""
+                    color: root.analyticsOpen ? root.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: chartMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleAnalytics()
+                  }
+
+                  PanelToolTip {
+                    visible: chartMouse.containsMouse
+                    text: root.analyticsOpen ? "Close telemetry analytics" : "Open telemetry & analytics"
+                    fontFamily: root.fontFamily
+                  }
+                }
+
+                // 2. Open Web UniFi Console Button
+                Rectangle {
+                  visible: root.connected && !root.settingsMode
+                  radius: 3
+                  color: webMouse.containsMouse ? root.cardHover : root.track
+                  Layout.preferredHeight: Style.space(24)
+                  Layout.preferredWidth: Style.space(24)
+
+                  Text {
+                    textFormat: Text.PlainText;
+                    anchors.centerIn: parent
+                    text: ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: webMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openConsole()
+                  }
+
+                  PanelToolTip {
+                    visible: webMouse.containsMouse
+                    text: "Open UniFi Cloud Portal in browser"
+                    fontFamily: root.fontFamily
+                  }
+                }
+
+                // Direct Connect Button
+                Rectangle {
+                  id: directConnectSiteBtn
+                  visible: root.connected && !root.settingsMode && root.inSite && (root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "") !== null)
+                  radius: 3
+                  color: directConnectMouse.containsMouse ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.2) : root.track
+                  border.width: 1
+                  border.color: directConnectMouse.containsMouse ? root.accent : root.outline
+                  Layout.preferredHeight: Style.space(24)
+                  Layout.preferredWidth: Style.space(24)
+
+                  Text {
+                    textFormat: Text.PlainText;
+                    anchors.centerIn: parent
+                    text: ""
+                    color: directConnectMouse.containsMouse ? root.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: directConnectMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      var c = root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "")
+                      if (c) {
+                        var target = c.directConnectUrl || (c.directConnectDomain ? ("https://" + c.directConnectDomain) : "") || c.localUrl || c.webCloudUrl
+                        if (target) Quickshell.execDetached(["xdg-open", target])
+                      }
+                    }
+                  }
+
+                  PanelToolTip {
+                    visible: directConnectMouse.containsMouse
+                    text: "Direct P2P connect to UniFi OS console"
+                    fontFamily: root.fontFamily
+                  }
+                }
+
+                // 3. Refresh Button
+                Rectangle {
+                  radius: 3
+                  color: refMouse.containsMouse ? root.cardHover : root.track
+                  Layout.preferredHeight: Style.space(24)
+                  Layout.preferredWidth: Style.space(24)
+
+                  Text {
+                    id: refBtnIcon
+                    textFormat: Text.PlainText;
+                    anchors.centerIn: parent
+                    text: ""
+                    color: root.loading ? root.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    transformOrigin: Item.Center
+
+                    RotationAnimation on rotation {
+                      running: root.loading
+                      loops: Animation.Infinite
+                      from: 0
+                      to: 360
+                      duration: 800
+                    }
+                  }
+
+                  MouseArea {
+                    id: refMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.inSite ? root.loadSite() : root.refresh()
+                  }
+
+                  PanelToolTip {
+                    visible: refMouse.containsMouse
+                    text: root.inSite ? "Refresh live site telemetry" : "Refresh fleet telemetry"
+                    fontFamily: root.fontFamily
+                  }
+                }
+
+                // 4. Settings Button
+                Rectangle {
+                  radius: 3
+                  color: setMouse.containsMouse ? root.cardHover : root.track
+                  Layout.preferredHeight: Style.space(24)
+                  Layout.preferredWidth: Style.space(24)
+
+                  Text {
+                    textFormat: Text.PlainText;
+                    anchors.centerIn: parent
+                    text: root.settingsMode ? "" : ""
+                    color: root.settingsMode ? root.accent : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: setMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.settingsMode ? root.closeSettings() : root.openSettings()
+                  }
+
+                  PanelToolTip {
+                    visible: setMouse.containsMouse
+                    text: root.settingsMode ? "Close settings" : "Plugin settings"
+                    fontFamily: root.fontFamily
+                  }
+                }
+              }
+            }
+
+            // Animated Progress Glow Pill on bottom border during refresh
+            Rectangle {
+              id: refreshProgressBar
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.bottomMargin: 1
+              height: 2
+              color: "transparent"
+              clip: true
+              visible: root.loading
+
+              Rectangle {
+                id: glowPill
+                anchors.verticalCenter: parent.verticalCenter
+                height: 2
+                width: Math.max(50, parent.width * 0.35)
+                radius: 1
+                color: root.accent
+
+                NumberAnimation on x {
+                  running: root.loading && root.opened
+                  loops: Animation.Infinite
+                  from: -glowPill.width
+                  to: refreshProgressBar.width
+                  duration: 800
+                  easing.type: Easing.InOutQuad
+                }
+              }
+            }
+          }
+
+          // Settings View
+          SettingsView {
+            visible: root.settingsMode
+            width: parent.width
+            settings: ({
+              enableMultiDot: root.enableMultiDot,
+              badgeMode: root.badgeMode,
+              refreshSeconds: root.refreshSeconds,
+              activeRefreshSeconds: root.activeRefreshSeconds,
+              idleRefreshSeconds: root.idleRefreshSeconds,
+              terminalCommand: root.preferredTerminal,
+              autoRotate: root.autoRotate,
+              enableNotifications: root.enableNotifications
+            })
+            foreground: root.foreground
+            dim: root.dim
+            accent: root.accent
+            card: root.card
+            cardHover: root.cardHover
+            track: root.track
+            outline: root.outline
+            urgent: root.urgent
+            healthy: root.healthy
+            fontFamily: root.fontFamily
+            onSettingChanged: function(key, val) {
+              root.updateSetting(key, val)
+            }
+            onClearHistoryRequested: {
+              root.clearResolvedIssues()
+            }
+            onTestNotifyRequested: {
+              root.testNotification()
+            }
+            diagnostics: root.diagnosticsData
+            lastErrorText: root.lastErrorText
+            diagnosticsRunning: root.diagnosticsRunning
+            onRunDiagnosticsRequested: {
+              root.runDiagnostics()
+            }
+            onCloseSettingsRequested: {
+              root.closeSettings()
+            }
+          }
 
         Text { textFormat: Text.PlainText;
           visible: root.notice !== ""
@@ -596,7 +1630,7 @@ Panel {
         }
 
         Column {
-          visible: !root.connected
+          visible: !root.connected && !root.settingsMode
           width: parent.width
           spacing: Style.space(12)
 
@@ -896,426 +1930,214 @@ Panel {
         }
 
         Column {
-          visible: root.connected && !root.inSite
+          visible: root.connected && !root.inSite && !root.settingsMode
           width: parent.width
           spacing: Style.space(12)
 
-          Row {
+          Rectangle {
             width: parent.width
-            spacing: Style.space(6)
-            Repeater {
-              model: root.cloudMode ? 2 : 3
-              Rectangle {
-                required property int index
-                width: Math.floor((content.width - Style.space(root.cloudMode ? 6 : 12)) / (root.cloudMode ? 2 : 3))
-                height: Style.space(34)
-                radius: Style.cornerRadius
-                color: root.activeTab === index
-                  ? Style.selectedFillFor(root.foreground, root.accent)
-                  : Style.normalFillFor(root.foreground, root.accent)
-                border.width: root.activeTab === index ? 1 : 0
-                border.color: root.accent
-                Text { textFormat: Text.PlainText;
-                  anchors.centerIn: parent
-                  text: Model.tabLabel(index, root.cloudMode)
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: root.activeTab === index
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.activeTab = index
-                }
-              }
-            }
-          }
+            height: Style.space(28)
+            color: root.track
+            radius: 4
+            border.width: 1
+            border.color: root.outline
 
-          Column {
-            visible: root.activeTab === 0
-            width: parent.width
-            spacing: Style.space(12)
+            RowLayout {
+              anchors.fill: parent
+              anchors.margins: Style.space(2)
+              spacing: Style.space(2)
 
-            BorderSurface {
-              width: parent.width
-              implicitHeight: healthRow.implicitHeight + Style.space(24)
-              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.05)
-              radius: Style.cornerRadius
-              borderSpec: Border.flat(root.severity === "critical" ? root.urgent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12), 1)
-              Row {
-                id: healthRow
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Style.space(12)
-                spacing: Style.space(12)
-                Text { textFormat: Text.PlainText;
-                  text: Model.severityIcon(root.severity)
-                  color: root.severity === "critical" ? root.urgent : root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
-                }
-                Column {
-                  width: parent.width - Style.space(50)
-                  Text { textFormat: Text.PlainText;
-                    text: root.severity === "healthy" ? "All sites healthy" : (root.severity === "critical" ? "Attention required" : "UniFi SiteThread notice")
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.title
-                    font.bold: true
-                  }
-                  Text { textFormat: Text.PlainText;
-                    text: Model.safe(root.data.message, "Connected")
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  Repeater {
-                    model: root.cloudMode ? root.attentionSites() : []
-                    Rectangle {
-                      required property var modelData
-                      width: parent.width
-                      height: Style.space(27)
-                      radius: Style.cornerRadius
-                      color: attentionArea.containsMouse
-                        ? Style.hoverFillFor(root.foreground, root.accent)
-                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-                      Row {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.margins: Style.space(7)
-                        spacing: Style.space(8)
-                        Rectangle {
-                          width: Style.space(8)
-                          height: width
-                          radius: width / 2
-                          color: root.siteAttentionColor(modelData)
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Text { textFormat: Text.PlainText;
-                          width: parent.width - attentionState.implicitWidth - Style.space(25)
-                          text: Model.safe(modelData.name, "UniFi site")
-                          elide: Text.ElideRight
-                          color: root.foreground
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          font.bold: true
-                        }
-                        Text { textFormat: Text.PlainText;
-                          id: attentionState
-                          text: String(modelData.status || "up") !== "up"
-                            ? String(modelData.statusText || "Needs attention")
-                            : String(modelData.offlineCount || 0) + " device(s) offline"
-                          color: root.siteAttentionColor(modelData)
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                        }
-                      }
-                      MouseArea {
-                        id: attentionArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.openSite(modelData)
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
               Repeater {
-                model: root.cloudMode ? [
-                  { key: "sites", label: "SITES", value: root.data.sites ? root.data.sites.length : 0, icon: "\uf3c5" },
-                  { key: "devices", label: "DEVICES", value: root.data.network ? root.data.network.deviceCount || 0 : 0, icon: "\uf233" },
-                  { key: "clients", label: "CLIENTS", value: root.data.network ? root.data.network.clientCount || 0 : 0, icon: "\uf0c0" },
-                  { key: "offline", label: "ISSUES", value: root.attentionSites().length + root.overviewDeviceItems("offline").length, icon: "\uf071" }
-                ] : [
-                  { key: "devices", label: "DEVICES", value: root.data.network ? root.data.network.deviceCount || 0 : 0, icon: "\uf233" },
-                  { key: "clients", label: "CLIENTS", value: root.data.network ? root.data.network.clientCount || 0 : 0, icon: "\uf0c0" },
-                  { key: "cameras", label: "CAMERAS", value: root.data.protect ? root.data.protect.cameraCount || 0 : 0, icon: "\uf03d" },
-                  { key: "offline", label: "OFFLINE", value: root.alertCount, icon: "\uf071" }
+                model: [
+                  { id: 0, label: "Overview", icon: "\uf0e4" },
+                  { id: 1, label: root.cloudMode ? "Sites (" + (root.data.sites ? root.data.sites.length : 0) + ")" : "Sites", icon: "\uf132" },
+                  { id: 2, label: "Issues (" + root.activeIssuesCount + ")", icon: "\uf071" },
+                  { id: 3, label: "Protect (" + (root.data.protect && root.data.protect.cameras ? root.data.protect.cameras.length : 0) + ")", icon: "\uf03d", visible: !root.cloudMode || (root.data.protect && root.data.protect.available) }
                 ]
-                BorderSurface {
+                delegate: Rectangle {
                   required property var modelData
-                  width: Math.floor((content.width - Style.space(24)) / 4)
-                  implicitHeight: statColumn.implicitHeight + Style.space(18)
-                  color: root.overviewSelection === String(modelData.key || "")
-                    ? Style.selectedFillFor(root.foreground, root.accent)
-                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
-                  radius: Style.cornerRadius
-                  borderSpec: Border.flat(root.overviewSelection === String(modelData.key || "") ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10), 1)
-                  Column {
-                    id: statColumn
+                  visible: modelData.visible !== false
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  radius: 3
+                  readonly property bool isSelected: root.activeTab === modelData.id
+                  color: isSelected ? root.accent : (tabMouse.containsMouse ? root.cardHover : "transparent")
+
+                  Behavior on color { ColorAnimation { duration: 120 } }
+
+                  RowLayout {
                     anchors.centerIn: parent
                     spacing: Style.space(3)
-                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: modelData.icon; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.subtitle }
-                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: String(modelData.value); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
-                    Text { textFormat: Text.PlainText; anchors.horizontalCenter: parent.horizontalCenter; text: modelData.label; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                  }
-                  MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.selectOverview(String(modelData.key || ""))
-                  }
-                }
-              }
-            }
 
-            Column {
-              visible: root.overviewSelection !== ""
-              width: parent.width
-              spacing: Style.space(8)
-
-              PanelSectionHeader {
-                width: parent.width
-                text: root.overviewSelection === "sites" ? "ALL SITES"
-                  : (root.overviewSelection === "devices" ? "DEVICES"
-                  : (root.overviewSelection === "clients" ? "CLIENTS BY SITE"
-                  : (root.overviewSelection === "cameras" ? "CAMERAS" : "SITES AND DEVICES NEEDING ATTENTION")))
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-              }
-
-              Repeater {
-                model: root.cloudMode ? root.overviewSiteItems(root.overviewSelection) : []
-                BorderSurface {
-                  required property var modelData
-                  width: content.width
-                  implicitHeight: overviewSiteRow.implicitHeight + Style.space(14)
-                  color: overviewSiteArea.containsMouse
-                    ? Style.hoverFillFor(root.foreground, root.accent)
-                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-                  radius: Style.cornerRadius
-                  borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09), 1)
-                  Row {
-                    id: overviewSiteRow
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: Style.space(8)
-                    spacing: Style.space(9)
-                    Rectangle {
-                      width: Style.space(9)
-                      height: width
-                      radius: width / 2
-                      color: root.siteAttentionColor(modelData)
-                      anchors.verticalCenter: parent.verticalCenter
-                    }
-                    Column {
-                      width: parent.width - overviewSiteValue.implicitWidth - Style.space(30)
-                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "UniFi site"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
-                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.isp, "") + (modelData.isp ? "  ·  " : "") + Model.safe(modelData.statusText, "Online"); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                    }
-                    Text { textFormat: Text.PlainText;
-                      id: overviewSiteValue
-                      text: root.overviewSelection === "clients"
-                        ? String(modelData.clientCount || 0) + " CLIENTS"
-                        : (root.overviewSelection === "offline" && Number(modelData.offlineCount || 0) > 0
-                          ? String(modelData.offlineCount) + " OFFLINE"
-                          : String(modelData.deviceCount || 0) + " DEVICES")
-                      color: root.overviewSelection === "offline" ? root.siteAttentionColor(modelData) : root.dim
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: modelData.icon
+                      color: isSelected ? root.accentForeground : (tabMouse.containsMouse ? root.foreground : root.dim)
                       font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      anchors.verticalCenter: parent.verticalCenter
+                      font.pixelSize: 9
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText;
+                      text: modelData.label
+                      color: isSelected ? root.accentForeground : (tabMouse.containsMouse ? root.foreground : root.dim)
+                      font.family: root.fontFamily
+                      font.pixelSize: 9
+                      font.bold: isSelected
+                      elide: Text.ElideRight
                     }
                   }
+
                   MouseArea {
-                    id: overviewSiteArea
+                    id: tabMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.openSite(modelData)
+                    onClicked: root.activeTab = modelData.id
                   }
                 }
-              }
-
-              Repeater {
-                model: root.overviewDeviceItems(root.overviewSelection)
-                BorderSurface {
-                  required property var modelData
-                  width: content.width
-                  implicitHeight: overviewDeviceRow.implicitHeight + Style.space(14)
-                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-                  radius: Style.cornerRadius
-                  borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09), 1)
-                  Row {
-                    id: overviewDeviceRow
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.margins: Style.space(8)
-                    spacing: Style.space(9)
-                    Rectangle { width: Style.space(9); height: width; radius: width / 2; color: modelData.online ? root.healthy : root.urgent; anchors.verticalCenter: parent.verticalCenter }
-                    Column {
-                      width: parent.width - Style.space(125)
-                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, root.overviewSelection === "cameras" ? "Camera" : "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
-                      Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.site, Model.safe(modelData.model, "")); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                    }
-                    Text { textFormat: Text.PlainText; text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  }
-                }
-              }
-
-              Text { textFormat: Text.PlainText;
-                visible: root.overviewSiteItems(root.overviewSelection).length === 0
-                  && root.overviewDeviceItems(root.overviewSelection).length === 0
-                width: parent.width
-                text: root.overviewSelection === "clients"
-                  ? "Client totals are available by site after connecting through UI Account"
-                  : "No matching items"
-                horizontalAlignment: Text.AlignHCenter
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
               }
             }
-
           }
 
-          Column {
+          // TAB 0: OVERVIEW COCKPIT & ASCII GLOBE
+          OverviewView {
+            id: overviewView
+            visible: root.activeTab === 0
+            width: parent.width
+
+            fleetData: root.data
+            activeIssuesCount: root.activeIssuesCount
+            siteDownCount: root.siteDownCount
+            siteBackupCount: root.siteBackupCount
+            autoRotate: root.autoRotate
+            opened: root.opened
+            issuesList: root.issuesList
+            isLightTheme: root.isLightTheme
+            activeTab: root.activeTab
+            sitesSubView: root.sitesSubView
+
+            foreground: root.foreground
+            dim: root.dim
+            accent: root.accent
+            accentForeground: root.accentForeground
+            urgent: root.urgent
+            healthy: root.healthy
+            backup: root.backup
+            card: root.card
+            cardHover: root.cardHover
+            track: root.track
+            outline: root.outline
+            fontFamily: root.fontFamily
+
+            onActiveTabChanged: { if (overviewView.activeTab !== undefined) root.activeTab = overviewView.activeTab }
+            onSitesSubViewChanged: { if (overviewView.sitesSubView !== undefined) root.sitesSubView = overviewView.sitesSubView }
+            onOpenSiteRequested: function(site) { root.openSite(site) }
+            onOpenAnalyticsRequested: function(tabIndex) { root.openAnalytics(tabIndex) }
+          }
+          // TAB 1: SITES & DEVICES (HIGH DENSITY FLEET VIEW)
+          SitesView {
+            id: sitesView
             visible: root.activeTab === 1
             width: parent.width
-            spacing: Style.space(8)
-            PanelSectionHeader { width: parent.width; text: root.cloudMode ? "ALL SITES" : "NETWORK DEVICES"; foreground: root.foreground; fontFamily: root.fontFamily }
-            Repeater {
-              model: root.cloudMode
-                ? (root.data.sites || [])
-                : (root.data.network && root.data.network.devices ? root.data.network.devices : [])
-              BorderSurface {
-                required property var modelData
-                width: content.width
-                implicitHeight: deviceRow.implicitHeight + Style.space(16)
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-                radius: Style.cornerRadius
-                borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09), 1)
-                Row {
-                  id: deviceRow
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.margins: Style.space(9)
-                  spacing: Style.space(10)
-                  Rectangle {
-                    width: Style.space(9)
-                    height: width
-                    radius: width / 2
-                    color: root.cloudMode
-                      ? Model.siteColor(modelData.status, root.healthy, root.backup, root.urgent)
-                      : (modelData.online ? root.healthy : root.urgent)
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                  Column {
-                    width: parent.width - Style.space(root.cloudMode ? 250 : 130)
-                    Text { textFormat: Text.PlainText; text: Model.safe(modelData.name, root.cloudMode ? "UniFi site" : "UniFi device"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-                    Text { textFormat: Text.PlainText;
-                      text: root.cloudMode
-                        ? String(modelData.deviceCount || 0) + " devices  ·  " + String(modelData.clientCount || 0) + " clients" + (modelData.isp ? "  ·  " + Model.safe(modelData.isp, "") : "") + "  ·  WAN " + Number(modelData.wanUptime || 0).toFixed(2) + "%"
-                        : Model.safe(modelData.model, "") + (modelData.ip ? "  ·  " + Model.safe(modelData.ip, "") : "")
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-                  Text { textFormat: Text.PlainText; visible: !root.cloudMode && modelData.update === true; text: "UPDATE"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  Text { textFormat: Text.PlainText;
-                    text: root.cloudMode
-                      ? String(modelData.statusText || "Online").toUpperCase()
-                      : (modelData.online ? "ONLINE" : "OFFLINE")
-                    color: root.cloudMode
-                      ? Model.siteColor(modelData.status, root.healthy, root.backup, root.urgent)
-                      : (modelData.online ? root.dim : root.urgent)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-                MouseArea { anchors.fill: parent; enabled: root.cloudMode; cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor; onClicked: root.openSite(modelData) }
-              }
-            }
-            Text { textFormat: Text.PlainText; visible: !root.data.network || !root.data.network.available; width: parent.width; text: "UniFi Network is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+
+            sitesSubView: root.sitesSubView
+            fleetData: root.data
+            cloudMode: root.cloudMode
+            deviceFilter: root.deviceFilter
+            fleetDevices: root.getAllFleetDevices()
+
+            foreground: root.foreground
+            dim: root.dim
+            accent: root.accent
+            accentForeground: root.accentForeground
+            urgent: root.urgent
+            healthy: root.healthy
+            backup: root.backup
+            backupForeground: root.backupForeground
+            card: root.card
+            cardHover: root.cardHover
+            track: root.track
+            outline: root.outline
+            fontFamily: root.fontFamily
+
+            onSitesSubViewChanged: { if (sitesView.sitesSubView !== undefined) root.sitesSubView = sitesView.sitesSubView }
+            onOpenSiteRequested: function(site) { root.openSite(site) }
+            onOpenAnalyticsRequested: function(tabIndex) { root.openAnalytics(tabIndex) }
+            onLaunchSshRequested: function(ip, user) { root.launchSsh(ip, user) }
+            onLaunchPingRequested: function(ip) { root.launchPing(ip) }
           }
 
-          Column {
+          // TAB 2: ISSUES & AUDIT TRAIL (HISTORICAL RESOLVED ISSUES GREYED OUT)
+          IssuesView {
+            id: issuesView
             visible: root.activeTab === 2
             width: parent.width
-            spacing: Style.space(8)
-            PanelSectionHeader { width: parent.width; text: root.cloudMode ? "PROTECT ACROSS ALL SITES" : "PROTECT CAMERAS"; foreground: root.foreground; fontFamily: root.fontFamily }
 
-            Rectangle {
-              visible: root.selectedCameraId !== ""
-              width: parent.width
-              height: Math.round(width * 9 / 16)
-              radius: Style.cornerRadius
-              color: Qt.rgba(0, 0, 0, 0.35)
-              clip: true
-              Image { anchors.fill: parent; source: root.snapshotPath; fillMode: Image.PreserveAspectCrop; cache: false; asynchronous: true }
-              Text { textFormat: Text.PlainText; anchors.centerIn: parent; visible: root.snapshotPath === ""; text: root.cloudMode ? "Open Site Manager for live video" : "Loading " + root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
-              Rectangle {
-                anchors.left: parent.left
-                anchors.bottom: parent.bottom
-                anchors.margins: Style.space(8)
-                width: cameraLabel.implicitWidth + Style.space(12)
-                height: cameraLabel.implicitHeight + Style.space(6)
-                radius: height / 2
-                color: Qt.rgba(0, 0, 0, 0.62)
-                Text { textFormat: Text.PlainText; id: cameraLabel; anchors.centerIn: parent; text: root.selectedCameraName; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-              }
-            }
+            issuesList: root.issuesList
+            activeIssuesCount: root.activeIssuesCount
+            issueFilter: root.issueFilter
 
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
-              Repeater {
-                model: root.data.protect && root.data.protect.cameras ? root.data.protect.cameras : []
-                Rectangle {
-                  required property var modelData
-                  width: Math.max(Style.space(110), Math.floor((content.width - Style.space(18)) / Math.min(4, root.data.protect.cameras.length)))
-                  height: Style.space(52)
-                  radius: Style.cornerRadius
-                  color: String(modelData.id) === root.selectedCameraId ? Style.selectedFillFor(root.foreground, root.accent) : Style.normalFillFor(root.foreground, root.accent)
-                  border.width: String(modelData.id) === root.selectedCameraId ? 1 : 0
-                  border.color: root.accent
-                  Column {
-                    anchors.centerIn: parent
-                    width: parent.width - Style.space(12)
-                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "Camera"); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; font.bold: true; elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter }
-                    Text { textFormat: Text.PlainText; width: parent.width; text: modelData.online ? "ONLINE" : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignHCenter }
-                  }
-                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.selectCamera(modelData) }
-                }
-              }
-            }
-            Text { textFormat: Text.PlainText; visible: !root.data.protect || !root.data.protect.available; width: parent.width; text: root.cloudMode ? "Site Manager did not report Protect devices for this account" : "UniFi Protect is unavailable for this connection"; horizontalAlignment: Text.AlignHCenter; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+            foreground: root.foreground
+            dim: root.dim
+            accent: root.accent
+            accentForeground: root.accentForeground
+            urgent: root.urgent
+            urgentForeground: root.urgentForeground
+            backup: root.backup
+            card: root.card
+            cardHover: root.cardHover
+            track: root.track
+            outline: root.outline
+            fontFamily: root.fontFamily
+
+            onIssueFilterChanged: { if (issuesView.issueFilter !== undefined) root.issueFilter = issuesView.issueFilter }
+            onClearHistoryRequested: root.clearHistory()
+          }
+
+          // TAB 3: PROTECT CAMERAS
+          ProtectView {
+            id: protectView
+            visible: root.activeTab === 3
+            width: parent.width
+
+            fleetData: root.data
+            cloudMode: root.cloudMode
+            selectedCameraId: root.selectedCameraId
+            selectedCameraName: root.selectedCameraName
+            snapshotPath: root.snapshotPath
+
+            foreground: root.foreground
+            dim: root.dim
+            accent: root.accent
+            urgent: root.urgent
+            fontFamily: root.fontFamily
+
+            onSelectCameraRequested: function(camId, camName) { root.selectCamera(camId, camName) }
+            onCleanupPriorSnapshotRequested: root.cleanupPriorSnapshot()
           }
 
           Rectangle { width: parent.width; height: 1; color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.1) }
 
-          Row {
+          RowLayout {
             width: parent.width
-            spacing: Style.space(10)
-            Text { textFormat: Text.PlainText;
-              width: parent.width - disconnectButton.width - Style.space(10)
-              text: root.cloudMode ? "UI Account key stored securely in Secret Service" : "Credentials stored securely in Secret Service"
+            spacing: Style.space(8)
+            Text {
+              textFormat: Text.PlainText;
+              Layout.fillWidth: true
+              text: root.cloudMode ? "UI Account key stored in Secret Service" : "Credentials stored in Secret Service"
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              anchors.verticalCenter: parent.verticalCenter
+              font.pixelSize: Style.font.caption - 2
+              elide: Text.ElideRight
             }
             Rectangle {
               id: disconnectButton
-              width: disconnectText.implicitWidth + Style.space(18)
-              height: Style.space(30)
+              implicitWidth: disconnectText.implicitWidth + Style.space(14)
+              implicitHeight: Style.space(24)
               radius: Style.cornerRadius
               color: disconnectArea.containsMouse ? Style.hoverFillFor(root.foreground, root.accent) : "transparent"
-              Text { textFormat: Text.PlainText; id: disconnectText; anchors.centerIn: parent; text: root.confirmDisconnect ? "Click again to forget" : "Disconnect"; color: root.confirmDisconnect ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Text { textFormat: Text.PlainText; id: disconnectText; anchors.centerIn: parent; text: root.confirmDisconnect ? "Confirm forget" : "Disconnect"; color: root.confirmDisconnect ? root.urgent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption - 2 }
               MouseArea {
                 id: disconnectArea
                 anchors.fill: parent
@@ -1331,7 +2153,7 @@ Panel {
         }
 
         Column {
-          visible: root.connected && root.inSite
+          visible: root.connected && root.inSite && !root.settingsMode
           width: parent.width
           spacing: Style.space(12)
 
@@ -1363,6 +2185,134 @@ Panel {
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+
+          // Direct Connect Quick-Launch Bar
+          BorderSurface {
+            id: directConnectBanner
+            visible: {
+              var c = root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "")
+              return c !== null && Boolean(c.directConnectDomain || c.directConnectUrl)
+            }
+            width: parent.width
+            implicitHeight: Style.space(34)
+            color: directBarMouse.containsMouse ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+            radius: Style.cornerRadius
+            borderSpec: Border.flat(directBarMouse.containsMouse ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10), 1)
+
+            MouseArea {
+              id: directBarMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                var c = root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "")
+                if (c && (c.directConnectUrl || c.directConnectDomain)) {
+                  Quickshell.execDetached(["xdg-open", c.directConnectUrl || ("https://" + c.directConnectDomain)])
+                }
+              }
+            }
+
+            RowLayout {
+              anchors.fill: parent
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(10)
+              spacing: Style.space(6)
+
+              Text {
+                textFormat: Text.PlainText;
+                text: ""
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                textFormat: Text.PlainText;
+                text: "Direct P2P:"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Text {
+                textFormat: Text.PlainText;
+                property var sc: root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "")
+                text: sc && sc.directConnectDomain ? sc.directConnectDomain : ""
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption - 1
+                elide: Text.ElideMiddle
+                Layout.fillWidth: true
+              }
+
+              Rectangle {
+                radius: 3
+                color: directBtnMouse.containsMouse ? root.accent : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.2)
+                implicitHeight: Style.space(22)
+                implicitWidth: directBtnTxt.implicitWidth + Style.space(12)
+                Text {
+                  id: directBtnTxt
+                  textFormat: Text.PlainText;
+                  anchors.centerIn: parent
+                  text: "Launch ↗"
+                  color: directBtnMouse.containsMouse ? root.card : root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption - 1
+                  font.bold: true
+                }
+                MouseArea {
+                  id: directBtnMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    var c = root.getSiteConsole(root.selectedSite ? root.selectedSite.hostId : "")
+                    if (c && (c.directConnectUrl || c.directConnectDomain)) {
+                      Quickshell.execDetached(["xdg-open", c.directConnectUrl || ("https://" + c.directConnectDomain)])
+                    }
+                  }
+                }
+
+                PanelToolTip {
+                  visible: directBtnMouse.containsMouse
+                  text: "Launch direct P2P console connection"
+                  fontFamily: root.fontFamily
+                }
+              }
+
+              Rectangle {
+                radius: 3
+                color: directHubMouse.containsMouse ? root.cardHover : root.track
+                implicitHeight: Style.space(22)
+                implicitWidth: directHubTxt.implicitWidth + Style.space(10)
+                Text {
+                  id: directHubTxt
+                  textFormat: Text.PlainText;
+                  anchors.centerIn: parent
+                  text: "Apps Hub "
+                  color: directHubMouse.containsMouse ? root.accent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption - 1
+                }
+                MouseArea {
+                  id: directHubMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    root.openAnalytics(4)
+                  }
+                }
+
+                PanelToolTip {
+                  visible: directHubMouse.containsMouse
+                  text: "Open UniFi OS applications hub"
+                  fontFamily: root.fontFamily
                 }
               }
             }
@@ -1438,41 +2388,30 @@ Panel {
             visible: root.siteData && root.siteData.ok === true && root.siteTab === 0
             width: parent.width
             spacing: Style.space(8)
-            PanelSectionHeader { width: parent.width; text: "LIVE NETWORK DEVICES"; foreground: root.foreground; fontFamily: root.fontFamily }
-            Repeater {
-              model: root.siteData.network && root.siteData.network.devices ? root.siteData.network.devices : []
-              BorderSurface {
-                required property var modelData
-                width: content.width
-                implicitHeight: siteDeviceRow.implicitHeight + Style.space(16)
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.035)
-                radius: Style.cornerRadius
-                borderSpec: Border.flat(Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.09), 1)
-                Row {
-                  id: siteDeviceRow
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.margins: Style.space(9)
-                  spacing: Style.space(10)
-                  Rectangle { width: Style.space(9); height: width; radius: width / 2; color: modelData.online ? root.healthy : root.urgent; anchors.verticalCenter: parent.verticalCenter }
-                  Column {
-                    width: parent.width - Style.space(125)
-                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.name, "UniFi device"); elide: Text.ElideRight; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-                    Text { textFormat: Text.PlainText; width: parent.width; text: Model.safe(modelData.model, "") + (modelData.ip ? "  ·  " + Model.safe(modelData.ip, "") : ""); elide: Text.ElideRight; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-                  }
-                  Text { textFormat: Text.PlainText; text: modelData.online ? (modelData.update ? "UPDATE" : "ONLINE") : "OFFLINE"; color: modelData.online ? root.dim : root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                }
-              }
-            }
-            Text { textFormat: Text.PlainText;
-              visible: !root.siteData.network || root.siteData.network.devices.length === 0
+            PanelSectionHeader { width: parent.width; text: "NETWORK TOPOLOGY & DEVICES"; foreground: root.foreground; fontFamily: root.fontFamily }
+
+            TopologyTreeView {
               width: parent.width
-              text: "No Network devices were returned for this site"
-              horizontalAlignment: Text.AlignHCenter
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              site: root.selectedSite
+              devices: root.siteData && root.siteData.network && root.siteData.network.devices ? root.siteData.network.devices : []
+              clients: (root.siteData && root.siteData.network && root.siteData.network.clients) || (root.siteData && root.siteData.clients) || (root.data && root.data.clients) || []
+              preferredTerminal: root.preferredTerminal
+              foreground: root.foreground
+              dim: root.dim
+              accent: root.accent
+              card: root.card
+              cardHover: root.cardHover
+              track: root.track
+              outline: root.outline
+              urgent: root.urgent
+              healthy: root.healthy
+              backup: root.backup
+              fontFamily: root.fontFamily
+              onSshRequested: function(ip, user) { root.launchSsh(ip, user) }
+              onPingRequested: function(ip) { root.launchPing(ip) }
+              onWebRequested: function(ip) {
+                if (ip) Quickshell.execDetached(["xdg-open", "https://" + ip])
+              }
             }
           }
 
@@ -1488,8 +2427,29 @@ Panel {
               radius: Style.cornerRadius
               color: Qt.rgba(0, 0, 0, 0.45)
               clip: true
-              Image { anchors.fill: parent; source: root.snapshotPath; fillMode: Image.PreserveAspectFit; cache: false; asynchronous: true }
-              Text { textFormat: Text.PlainText; anchors.centerIn: parent; visible: root.snapshotPath === ""; text: "Loading " + root.selectedCameraName + "…"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+              Image {
+                anchors.fill: parent
+                source: root.snapshotPath
+                fillMode: Image.PreserveAspectFit
+                cache: false
+                asynchronous: true
+                onStatusChanged: {
+                  if (status === Image.Ready) {
+                    root.cleanupPriorSnapshot()
+                  }
+                }
+              }
+              Text {
+                textFormat: Text.PlainText;
+                anchors.centerIn: parent;
+                visible: root.snapshotPath === "";
+                text: root.cameraPermissionError !== ""
+                  ? root.cameraPermissionError
+                  : ("Loading " + root.selectedCameraName + "…");
+                color: root.cameraPermissionError !== "" ? root.urgent : root.foreground;
+                font.family: root.fontFamily;
+                font.pixelSize: Style.font.body
+              }
               Rectangle {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
@@ -1538,6 +2498,37 @@ Panel {
       }
     }
   }
+}
+
+  Loader {
+    id: analyticsWindowLoader
+    active: root.analyticsOpen
+    source: Qt.resolvedUrl("windows/AnalyticsWindow.qml")
+    onLoaded: {
+      if (item) {
+        item.fleetData = Qt.binding(function() { return root.data })
+        item.currentTab = root.analyticsTab
+        item.visible = Qt.binding(function() { return root.analyticsOpen })
+        item.isRefreshing = Qt.binding(function() { return root.loading })
+        item.refreshRequested.connect(function() {
+          root.refresh()
+        })
+        item.closed.connect(function() {
+          root.closeAnalytics()
+        })
+      }
+    }
+  }
+
+  Connections {
+    target: analyticsWindowLoader.item
+    ignoreUnknownSignals: true
+    function onVisibleChanged() {
+      if (analyticsWindowLoader.item && !analyticsWindowLoader.item.visible) {
+        root.closeAnalytics()
+      }
+    }
+  }
 
   IpcHandler {
     target: root.ipcTarget
@@ -1546,13 +2537,81 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
+    function openSettings(): void { root.open(); root.openSettings() }
+    function closeSettings(): void { root.closeSettings() }
+    function openAnalytics(): void { root.openAnalytics(0) }
+    function openAnalyticsTab(index: int): void { root.openAnalytics(index) }
+    function closeAnalytics(): void { root.closeAnalytics() }
+    function toggleAnalytics(): void { root.toggleAnalytics() }
+    function filterAnalyticsSite(siteName: string): void {
+      if (analyticsWindowLoader.item) {
+        analyticsWindowLoader.item.toggleSiteSelection({ name: siteName, id: siteName })
+      }
+    }
+    function clearAnalyticsSiteFilter(): void {
+      if (analyticsWindowLoader.item) {
+        analyticsWindowLoader.item.clearSiteSelection()
+      }
+    }
+    function hoverAnalyticsThroughput(index: int): void {
+      if (analyticsWindowLoader.item) {
+        analyticsWindowLoader.item.chartHoverIndex = index
+        analyticsWindowLoader.item.chartHoverMouseX = 50 + index * 24
+        analyticsWindowLoader.item.chartHoverMouseY = 120
+      }
+    }
     function tab(index: int): void {
-      root.activeTab = Math.max(0, Math.min(2, index))
+      root.activeTab = Math.max(0, Math.min(3, index))
       root.open()
+    }
+    function setSitesSubView(view: string): void {
+      root.sitesSubView = view === "devices" ? "devices" : "sites"
+    }
+    function setSitesTimeRange(range: string): void {
+      if (sitesView) sitesView.timeRange = range
+    }
+    function openSiteByIndex(index: int): void {
+      var sites = root.data && root.data.sites ? root.data.sites : []
+      if (index >= 0 && index < sites.length) {
+        root.open()
+        root.openSite(sites[index])
+      }
+    }
+    function backToSites(): void {
+      root.backToSites()
+    }
+    function rotate(longitude: real): void {
+      if (overviewView && overviewView.fleetGlobe) overviewView.fleetGlobe.centreLongitude = GlobeModel.wrapLongitude(longitude)
+    }
+    function zoomIn(): void { if (overviewView && overviewView.fleetGlobe) overviewView.fleetGlobe.zoomIn() }
+    function zoomOut(): void { if (overviewView && overviewView.fleetGlobe) overviewView.fleetGlobe.zoomOut() }
+    function setGlobeScale(scale: real): void { if (overviewView && overviewView.fleetGlobe) overviewView.fleetGlobe.globeScale = scale }
+    function globeScaleValue(): real { return (overviewView && overviewView.fleetGlobe) ? overviewView.fleetGlobe.globeScale : 1.0 }
+    function visibleSitesCount(): int {
+      return (overviewView && overviewView.fleetGlobe && overviewView.fleetGlobe.visibleSites) ? overviewView.fleetGlobe.visibleSites.length : 0
+    }
+    function prefetchSites(): void { root.prefetchSites() }
+    function goToMainPage(): void { root.goToMainPage() }
+    function handleBarClick(button: int): void { root.handleBarClick(button) }
+    function notify(title: string, message: string, urgency: string): void {
+      root.sendDesktopNotification(title, message, urgency)
+    }
+    function testNotification(): void {
+      root.testNotification()
     }
     function status(): string {
       return JSON.stringify({
         opened: root.opened,
+        settingsMode: root.settingsMode,
+        analyticsOpen: root.analyticsOpen,
+        analyticsTab: root.analyticsTab,
+        analyticsCurrentTab: (analyticsWindowLoader.item ? analyticsWindowLoader.item.currentTab : -1),
+        activeTab: root.activeTab,
+        sitesSubView: root.sitesSubView,
+        sitesTimeRange: (sitesView ? sitesView.timeRange : ""),
+        inSite: root.inSite,
+        siteLoading: root.siteLoading,
+        siteLiveRefreshing: root.siteLiveRefreshing,
         hasBar: root.bar !== null,
         rootWindow: root.QsWindow.window !== null,
         buttonWindow: button.QsWindow.window !== null,

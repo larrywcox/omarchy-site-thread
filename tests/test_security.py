@@ -76,11 +76,37 @@ class JsonLimitTests(unittest.TestCase):
 
 class QmlSafetyTests(unittest.TestCase):
     def test_every_text_item_is_plain_text(self) -> None:
-        source = (ROOT / "Panel.qml").read_text(encoding="utf-8")
-        items = re.findall(r"\bText\s*\{.*?(?=\bText\s*\{|\Z)", source, re.S)
-        self.assertTrue(items)
-        for item in items:
-            self.assertEqual(item.count("textFormat: Text.PlainText"), 1)
+        for qml_file in (ROOT / "Panel.qml", ROOT / "windows" / "AnalyticsWindow.qml", ROOT / "Globe.qml"):
+            source = qml_file.read_text(encoding="utf-8")
+            items = re.findall(r"\bText\s*\{.*?(?=\bText\s*\{|\Z)", source, re.S)
+            self.assertTrue(items)
+            for item in items:
+                self.assertEqual(item.count("textFormat: Text.PlainText"), 1)
+
+    def test_qml_brace_balance(self) -> None:
+        for qml_file in ROOT.glob("**/*.qml"):
+            source = qml_file.read_text(encoding="utf-8")
+            stack = []
+            for i, line in enumerate(source.splitlines(), 1):
+                in_str = False
+                str_char = None
+                for j, c in enumerate(line):
+                    if c in "\"'`":
+                        if not in_str:
+                            in_str = True
+                            str_char = c
+                        elif str_char == c and (j == 0 or line[j - 1] != "\\"):
+                            in_str = False
+                    if in_str:
+                        continue
+                    if line[j : j + 2] == "//":
+                        break
+                    if c == "{":
+                        stack.append((i, line.strip()))
+                    elif c == "}":
+                        self.assertTrue(bool(stack), f"Unmatched closing brace in {qml_file.name}:{i}")
+                        stack.pop()
+            self.assertEqual(len(stack), 0, f"Unclosed braces in {qml_file.name}: {stack}")
 
 
 if __name__ == "__main__":

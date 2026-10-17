@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "larrywcox.site-thread",
   "name": "UniFi SiteThread",
-  "version": "0.4.7",
-  "author": "Larry Cox",
-  "description": "Fleet-wide UniFi Site Manager with in-panel Network and Protect site views.",
-  "homepage": "https://github.com/larrywcox/omarchy-site-thread",
+  "version": "0.5.1",
+  "author": "Larry Cox (Forked by BoeyCorp)",
+  "description": "Fleet-wide UniFi Site Manager cockpit with ASCII fleet globe, resolved issue history, and in-panel Network and Protect telemetry.",
+  "homepage": "https://github.com/BoeyCorp/omarchy-site-thread",
   "license": "MIT",
   "kinds": [
     "bar-widget"
@@ -21,18 +21,62 @@
     "defaultSection": "right",
     "defaults": {
       "refreshSeconds": 30,
-      "panelWidth": 760
+      "activeRefreshSeconds": 15,
+      "idleRefreshSeconds": 120,
+      "panelWidth": 780,
+      "enableMultiDot": true,
+      "badgeMode": "alerts",
+      "terminalCommand": "xdg-terminal-exec"
     },
     "schema": [
       {
         "key": "refreshSeconds",
         "type": "integer",
         "label": "Refresh interval (seconds)",
-        "min": 10,
-        "max": 600,
-        "step": 5,
+        "min": 15,
+        "max": 300,
+        "step": 15,
         "defaultValue": 30,
         "description": "How often UniFi SiteThread refreshes Network and Protect health."
+      },
+      {
+        "key": "activeRefreshSeconds",
+        "type": "integer",
+        "label": "Active refresh interval (seconds)",
+        "min": 10,
+        "max": 15,
+        "step": 5,
+        "defaultValue": 15,
+        "description": "Polling frequency while the popup panel or Analytics window is open."
+      },
+      {
+        "key": "idleRefreshSeconds",
+        "type": "integer",
+        "label": "Idle refresh interval (seconds)",
+        "min": 60,
+        "max": 300,
+        "step": 60,
+        "defaultValue": 120,
+        "description": "Polling frequency while the UI is closed in background."
+      },
+      {
+        "key": "badgeMode",
+        "type": "enum",
+        "label": "Bar badge mode",
+        "options": ["alerts", "clients", "sites", "updates", "off"],
+        "defaultValue": "alerts"
+      },
+      {
+        "key": "enableMultiDot",
+        "type": "boolean",
+        "label": "Show multi-dot site status in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "terminalCommand",
+        "type": "string",
+        "label": "Terminal command for SSH",
+        "defaultValue": "xdg-terminal-exec"
       },
       {
         "key": "panelWidth",
@@ -41,7 +85,7 @@
         "min": 520,
         "max": 1200,
         "step": 20,
-        "defaultValue": 760
+        "defaultValue": 780
       }
     ]
   }
